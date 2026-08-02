@@ -25,7 +25,7 @@ struct ScoreEntryView: View {
                     Text("Level \(levelNumber): \(definition.goal)").font(.headline)
                 }
                 Section("Scores") {
-                    ForEach(round.participants) { participant in
+                    ForEach(round.orderedParticipants) { participant in
                         TextField(participant.displayName, text: scoreBinding(for: participant))
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)

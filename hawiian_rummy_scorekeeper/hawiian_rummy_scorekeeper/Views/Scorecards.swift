@@ -31,7 +31,7 @@ struct LevelScoreMatrixView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 0) {
                         matrixCell("Level", width: 70, emphasized: true)
-                        ForEach(round.participants) { participant in
+                        ForEach(round.orderedParticipants) { participant in
                             matrixCell(participant.displayName, width: 118, emphasized: true)
                         }
                     }
@@ -39,7 +39,7 @@ struct LevelScoreMatrixView: View {
                         let level = round.levels.first { $0.levelNumber == definition.number }
                         HStack(spacing: 0) {
                             matrixCell("\(definition.number)", width: 70, emphasized: true)
-                            ForEach(round.participants) { participant in
+                            ForEach(round.orderedParticipants) { participant in
                                 let score = level?.entries.first { $0.participant?.id == participant.id }?.score
                                 matrixCell(score.map(String.init) ?? "—", width: 118, emphasized: false)
                             }
@@ -47,7 +47,7 @@ struct LevelScoreMatrixView: View {
                     }
                     HStack(spacing: 0) {
                         matrixCell("Total", width: 70, emphasized: true)
-                        ForEach(round.participants) { participant in
+                        ForEach(round.orderedParticipants) { participant in
                             matrixCell("\(GameRules.score(for: participant, in: round))", width: 118, emphasized: true)
                         }
                     }

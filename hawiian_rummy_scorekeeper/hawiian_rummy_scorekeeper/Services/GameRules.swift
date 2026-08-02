@@ -14,7 +14,7 @@ struct LevelDefinition: Identifiable {
         LevelDefinition(number: 4, cards: 10, goal: "3 Sets"),
         LevelDefinition(number: 5, cards: 11, goal: "Run of 7 · 1 Set"),
         LevelDefinition(number: 6, cards: 12, goal: "2 Runs · 1 Set"),
-        LevelDefinition(number: 7, cards: 12, goal: "2 Sets · 1 Run · No discards")
+        LevelDefinition(number: 7, cards: 12, goal: "2 Sets · 1 Run\nNo Discards")
     ]
 
     static func definition(for number: Int) -> LevelDefinition { all[number - 1] }
@@ -73,7 +73,8 @@ enum GameRules {
     }
 
     static func createRound(in game: Game) -> GameRound {
-        let round = GameRound(number: game.rounds.count + 1, game: game, players: game.players)
+        let roster = game.sortedRounds.first?.orderedParticipants.compactMap(\.player) ?? game.players
+        let round = GameRound(number: game.rounds.count + 1, game: game, players: roster)
         game.rounds.append(round)
         return round
     }
@@ -81,12 +82,12 @@ enum GameRules {
     static func save(scores: [UUID: Int], for levelNumber: Int, in round: GameRound, context: ModelContext) {
         if let existing = round.levels.first(where: { $0.levelNumber == levelNumber }) {
             existing.entries.forEach(context.delete)
-            existing.entries = round.participants.compactMap { participant in
+            existing.entries = round.orderedParticipants.compactMap { participant in
                 scores[participant.id].map { ScoreEntry(score: $0, participant: participant) }
             }
         } else {
             let level = LevelResult(levelNumber: levelNumber)
-            level.entries = round.participants.compactMap { participant in
+            level.entries = round.orderedParticipants.compactMap { participant in
                 scores[participant.id].map { ScoreEntry(score: $0, participant: participant) }
             }
             round.levels.append(level)

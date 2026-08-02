@@ -44,7 +44,12 @@ struct HomeView: View {
                 }
                 .padding()
             }
-            .background(Color.softPurpleBackground)
+            .background {
+                ZStack {
+                    Color.softPurpleBackground
+                    HomeCardBackground()
+                }
+            }
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(for: Game.self) { GameDetailView(game: $0) }
@@ -56,5 +61,49 @@ struct HomeView: View {
                 }
             }
         }
+    }
+}
+
+private struct HomeCardBackground: View {
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                HomeDecorativeCard(suit: "suit.diamond.fill", tint: .warmGold)
+                    .rotationEffect(.degrees(-18))
+                    .position(x: 66, y: proxy.size.height * 0.67)
+                HomeDecorativeCard(suit: "suit.spade.fill", tint: .grammyPurple)
+                    .rotationEffect(.degrees(21))
+                    .position(x: proxy.size.width - 56, y: proxy.size.height * 0.56)
+                HomeDecorativeCard(suit: "suit.heart.fill", tint: .warmGold)
+                    .rotationEffect(.degrees(15))
+                    .position(x: 60, y: proxy.size.height * 0.89)
+                HomeDecorativeCard(suit: "suit.club.fill", tint: .grammyPurple)
+                    .rotationEffect(.degrees(-22))
+                    .position(x: proxy.size.width - 60, y: proxy.size.height * 0.83)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct HomeDecorativeCard: View {
+    let suit: String
+    let tint: Color
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 15, style: .continuous)
+            .fill(Color.grammyDecorativeSurface)
+            .frame(width: 92, height: 126)
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(Color.grammyLavender.opacity(0.42), lineWidth: 1)
+            }
+            .overlay {
+                Image(systemName: suit)
+                    .font(.system(size: 32, weight: .medium))
+                    .foregroundStyle(tint.opacity(0.48))
+            }
+            .shadow(color: .black.opacity(0.08), radius: 8, y: 4)
     }
 }

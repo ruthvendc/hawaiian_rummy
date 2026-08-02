@@ -57,21 +57,16 @@ struct GameDetailView: View {
         } else {
             let nextLevel = round.levels.count + 1
             let definition = LevelDefinition.definition(for: nextLevel)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Round \(round.number) · Level \(nextLevel)").font(.title2.bold())
-                Text("Deal \(definition.cards) cards · \(definition.goal)")
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-            }
+            LevelMissionCard(roundNumber: round.number, handNumber: nextLevel, definition: definition)
             if nextLevel == 7 {
                 Text("“This separates the wheat from the chaff”")
                     .font(.headline.italic()).padding()
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.warmGold.opacity(0.2), in: RoundedRectangle(cornerRadius: 14))
             }
-            standingsCard(round)
             Button { scoreLevel = nextLevel; showingScoreEntry = true } label: { Label("Enter Scores", systemImage: "square.and.pencil").frame(maxWidth: .infinity) }
                 .buttonStyle(.borderedProminent).controlSize(.large)
+            standingsCard(round)
             if let previous = round.levels.map(\.levelNumber).max() {
                 Button("Edit Previous Level") { scoreLevel = previous; showingScoreEntry = true }
                     .frame(maxWidth: .infinity).buttonStyle(.bordered)
@@ -99,6 +94,48 @@ struct GameDetailView: View {
             }
         }
         .padding().background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct LevelMissionCard: View {
+    let roundNumber: Int
+    let handNumber: Int
+    let definition: LevelDefinition
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("ROUND \(roundNumber) · HAND \(handNumber)")
+                    .font(.caption.weight(.bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Color.grammyPurple)
+                Spacer()
+                Image(systemName: "suit.spade.fill")
+                    .foregroundStyle(Color.grammyPurple.opacity(0.7))
+            }
+            Divider().overlay(Color.grammyPurple.opacity(0.25))
+            Text("Objective")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(definition.goal)
+                .font(.title.bold())
+                .foregroundStyle(.primary)
+            Label("\(definition.cards) Cards", systemImage: "rectangle.on.rectangle")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.grammyPurple)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.grammyLavender.opacity(0.65), in: Capsule())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(Color.grammySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.grammyPurple.opacity(0.28), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Round \(roundNumber), hand \(handNumber). Objective: \(definition.goal). \(definition.cards) cards.")
     }
 }
 

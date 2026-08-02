@@ -6,9 +6,20 @@ struct GamesView: View {
     @Query(sort: \Game.createdAt, order: .reverse) private var games: [Game]
     @State private var gameToDelete: Game?
 
+    private var completedCount: Int { games.filter(\.isComplete).count }
+    private var activeCount: Int { games.count - completedCount }
+
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    SectionIntroCard(
+                        title: "Game History",
+                        subtitle: "\(completedCount) completed · \(activeCount) in progress",
+                        icon: "rectangle.stack.fill"
+                    )
+                    .listRowBackground(Color.clear)
+                }
                 if games.isEmpty {
                     ContentUnavailableView("No games yet", systemImage: "rectangle.stack", description: Text("Start a game from Home when your table is ready."))
                 }
@@ -27,6 +38,8 @@ struct GamesView: View {
                 }
             }
             .scrollContentBackground(.hidden)
+            .contentMargins(.top, 6, for: .scrollContent)
+            .listSectionSpacing(10)
             .background(Color.softPurpleBackground)
             .navigationTitle("Games")
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)

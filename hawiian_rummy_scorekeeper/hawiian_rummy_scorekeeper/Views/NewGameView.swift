@@ -5,35 +5,52 @@ struct NewGameView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
     @Query(sort: \PlayerProfile.name) private var players: [PlayerProfile]
-    @State private var selectedIDs = Set<UUID>()
+    @State private var selectedIDs: [UUID] = []
     @State private var title = "Family Game"
     let onStart: (Game) -> Void
 
     private var availablePlayers: [PlayerProfile] { players.filter { !$0.isRetired } }
-    private var selection: [PlayerProfile] { availablePlayers.filter { selectedIDs.contains($0.id) } }
+    private var selection: [PlayerProfile] {
+        selectedIDs.compactMap { selectedID in
+            availablePlayers.first { $0.id == selectedID }
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Game") { TextField("Game name", text: $title) }
                 Section("Players") {
-                    Text("Choose at least two players. The roster stays fixed for this game.")
+                    Text("Tap players in the order you want to keep score. The roster stays fixed for this game.")
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(.primary)
                     if availablePlayers.isEmpty {
                         Text("Add players in the Players tab first.").foregroundStyle(.secondary)
                     }
                     ForEach(availablePlayers) { player in
-                        Toggle(player.name, isOn: Binding(
-                            get: { selectedIDs.contains(player.id) },
+                        HStack {
+                            Text(player.name)
+                            Spacer()
+                            if let position = selectedIDs.firstIndex(of: player.id) {
+                                Text("\(position + 1)")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(Color.grammyPurple)
+                                    .frame(width: 24, height: 24)
+                                    .background(Color.grammyLavender, in: Circle())
+                                    .accessibilityLabel("Score entry position \(position + 1)")
+                            }
+                            Toggle("Select \(player.name)", isOn: Binding(
+                                get: { selectedIDs.contains(player.id) },
                             set: { selected in
                                 if selected {
-                                    selectedIDs.insert(player.id)
+                                    selectedIDs.append(player.id)
                                 } else {
-                                    selectedIDs.remove(player.id)
+                                    selectedIDs.removeAll { $0 == player.id }
                                 }
                             }
-                        ))
+                            ))
+                            .labelsHidden()
+                        }
                     }
                 }
             }

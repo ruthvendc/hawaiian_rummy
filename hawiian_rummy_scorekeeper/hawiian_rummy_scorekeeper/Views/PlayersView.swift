@@ -9,9 +9,19 @@ struct PlayersView: View {
     @State private var playerToRemove: PlayerProfile?
     @State private var rename = ""
 
+    private var activePlayers: [PlayerProfile] { players.filter { !$0.isRetired } }
+
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    SectionIntroCard(
+                        title: "Players",
+                        subtitle: "\(activePlayers.count) saved \(activePlayers.count == 1 ? "player" : "players")",
+                        icon: "person.2.fill"
+                    )
+                    .listRowBackground(Color.clear)
+                }
                 Section("Add Player") {
                     HStack {
                         TextField("Name", text: $newName)
@@ -26,11 +36,13 @@ struct PlayersView: View {
                         .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
-                Section("Active Players") {
-                    ForEach(players.filter { !$0.isRetired }) { playerRow($0) }
+                Section("Saved Players") {
+                    ForEach(activePlayers) { playerRow($0) }
                 }
             }
             .scrollContentBackground(.hidden)
+            .contentMargins(.top, 6, for: .scrollContent)
+            .listSectionSpacing(10)
             .background(Color.softPurpleBackground)
             .navigationTitle("Players")
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)

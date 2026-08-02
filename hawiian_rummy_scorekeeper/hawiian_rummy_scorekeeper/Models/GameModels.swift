@@ -53,24 +53,35 @@ final class GameRound {
         self.number = number
         self.createdAt = .now
         self.game = game
-        self.participants = players.map { RoundParticipant(player: $0) }
+        self.participants = players.enumerated().map { index, player in
+            RoundParticipant(player: player, displayOrder: index)
+        }
         self.levels = []
     }
 
     var isComplete: Bool { completedAt != nil }
     var sortedLevels: [LevelResult] { levels.sorted { $0.levelNumber < $1.levelNumber } }
+    var orderedParticipants: [RoundParticipant] {
+        participants.sorted {
+            let leftOrder = $0.displayOrder ?? Int.max
+            let rightOrder = $1.displayOrder ?? Int.max
+            return leftOrder == rightOrder ? $0.displayName < $1.displayName : leftOrder < rightOrder
+        }
+    }
 }
 
 @Model
 final class RoundParticipant {
     @Attribute(.unique) var id: UUID
     var displayName: String
+    var displayOrder: Int?
     var player: PlayerProfile?
     var round: GameRound?
 
-    init(player: PlayerProfile) {
+    init(player: PlayerProfile, displayOrder: Int) {
         self.id = UUID()
         self.displayName = player.name
+        self.displayOrder = displayOrder
         self.player = player
     }
 }

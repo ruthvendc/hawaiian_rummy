@@ -45,6 +45,14 @@ struct LifetimeLeaderboardView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    SectionIntroCard(
+                        title: "Family Records",
+                        subtitle: "\(completedGames.count) completed games · \(completedRounds.count) completed rounds",
+                        icon: "trophy.fill"
+                    )
+                    .listRowBackground(Color.clear)
+                }
                 Section("Competitive Records") {
                     RecordRow(title: "Most Game Wins", value: gameWinsRecord)
                     RecordRow(title: "Most Round Wins", value: roundWinsRecord)
@@ -58,6 +66,8 @@ struct LifetimeLeaderboardView: View {
                 }
             }
             .scrollContentBackground(.hidden)
+            .contentMargins(.top, 6, for: .scrollContent)
+            .listSectionSpacing(10)
             .background(Color.softPurpleBackground)
             .navigationTitle("Family Records")
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
@@ -146,10 +156,12 @@ private struct RecordRow: View {
             Text(title).font(.headline)
             Text(value.detail).font(.body.weight(.medium))
             if !value.holders.isEmpty {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], alignment: .leading, spacing: 6) {
+                NameChipFlowLayout(spacing: 6) {
                     ForEach(value.holders, id: \.self) { holder in
                         Text(holder)
                             .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(Color.grammyLavender.opacity(0.7), in: Capsule())
@@ -167,4 +179,49 @@ private struct RecordRow: View {
 private struct RecordResult {
     var holders: [String] = []
     let detail: String
+}
+
+private struct NameChipFlowLayout: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + spacing + size.width > maxWidth {
+                y += rowHeight + spacing
+                x = 0
+                rowHeight = 0
+            }
+            if x > 0 { x += spacing }
+            x += size.width
+            rowHeight = max(rowHeight, size.height)
+            usedWidth = max(usedWidth, x)
+        }
+        return CGSize(width: proposal.width ?? usedWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + spacing + size.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            if x > bounds.minX { x += spacing }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+            x += size.width
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
 }
