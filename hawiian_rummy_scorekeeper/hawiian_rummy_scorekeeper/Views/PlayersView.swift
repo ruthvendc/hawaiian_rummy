@@ -8,8 +8,15 @@ struct PlayersView: View {
     @State private var editingPlayer: PlayerProfile?
     @State private var playerToRemove: PlayerProfile?
     @State private var rename = ""
+    @FocusState private var isNameFieldFocused: Bool
 
     private var activePlayers: [PlayerProfile] { players.filter { !$0.isRetired } }
+    private var trimmedNewName: String { newName.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var hasDuplicateNewName: Bool {
+        activePlayers.contains { player in
+            player.name.compare(trimmedNewName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -26,15 +33,30 @@ struct PlayersView: View {
                     HStack {
                         TextField("Name", text: $newName)
                             .textInputAutocapitalization(.words)
-                        Button("Add") {
-                            let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !name.isEmpty else { return }
-                            context.insert(PlayerProfile(name: name))
-                            try? context.save()
-                            newName = ""
+                            .focused($isNameFieldFocused)
+                            .onSubmit(addPlayer)
+                            .accessibilityLabel("New player name")
+                        Button(action: addPlayer) {
+                            Text("Add Player")
                         }
-                        .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(trimmedNewName.isEmpty || hasDuplicateNewName)
+                        .accessibilityHint("Saves this player and lets you add another name")
                     }
+                    if hasDuplicateNewName {
+                        Label("That player is already in your list.", systemImage: "exclamationmark.circle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("Duplicate player name. That player is already in your list.")
+                    }
+                    Button {
+                        isNameFieldFocused = false
+                    } label: {
+                        Label("Done Adding Players", systemImage: "checkmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .accessibilityHint("Dismisses the keyboard so you can review your saved players")
                 }
                 Section("Saved Players") {
                     ForEach(activePlayers) { playerRow($0) }
@@ -67,6 +89,14 @@ struct PlayersView: View {
                 Text("They will no longer appear when starting a new game, but their existing scorecards will stay intact.")
             }
         }
+    }
+
+    private func addPlayer() {
+        guard !trimmedNewName.isEmpty, !hasDuplicateNewName else { return }
+        context.insert(PlayerProfile(name: trimmedNewName))
+        try? context.save()
+        newName = ""
+        isNameFieldFocused = true
     }
 
     @ViewBuilder private func playerRow(_ player: PlayerProfile) -> some View {

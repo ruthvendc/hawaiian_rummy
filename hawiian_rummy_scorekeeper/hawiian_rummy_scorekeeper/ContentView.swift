@@ -27,6 +27,8 @@ private struct MainTabView: View {
                 .tabItem { Label("Players", systemImage: "person.2.fill") }
             LifetimeLeaderboardView()
                 .tabItem { Label("Records", systemImage: "trophy.fill") }
+            RulesView()
+                .tabItem { Label("Rules", systemImage: "book.closed.fill") }
         }
         .toolbarBackground(Color.softPurpleBackground, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)

@@ -8,6 +8,8 @@ struct GameDetailView: View {
     @State private var scoreLevel = 1
     @State private var showingScoreEntry = false
     @State private var showEndConfirmation = false
+    @State private var showingRename = false
+    @State private var renamedTitle = ""
     let game: Game
 
     /// The latest round remains the active dashboard until the family starts another
@@ -30,8 +32,27 @@ struct GameDetailView: View {
         .toolbarBackground(.visible, for: .navigationBar)
         .navigationTitle(game.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Rename") {
+                    renamedTitle = game.title
+                    showingRename = true
+                }
+            }
+        }
         .sheet(isPresented: $showingScoreEntry) {
             if let currentRound { ScoreEntryView(round: currentRound, levelNumber: scoreLevel) }
+        }
+        .alert("Rename Game", isPresented: $showingRename) {
+            TextField("Game name", text: $renamedTitle)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                let title = renamedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !title.isEmpty else { return }
+                game.title = title
+                try? context.save()
+            }
+            .disabled(renamedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .confirmationDialog("End this game?", isPresented: $showEndConfirmation, titleVisibility: .visible) {
             Button("End Game", role: .destructive) {
