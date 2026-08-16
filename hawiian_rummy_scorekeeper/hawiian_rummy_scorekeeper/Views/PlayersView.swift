@@ -8,6 +8,8 @@ struct PlayersView: View {
     @State private var editingPlayer: PlayerProfile?
     @State private var playerToRemove: PlayerProfile?
     @State private var rename = ""
+    @State private var lastAddedPlayerName: String?
+    @State private var hasAddedPlayerThisVisit = false
     @FocusState private var isNameFieldFocused: Bool
 
     private var activePlayers: [PlayerProfile] { players.filter { !$0.isRetired } }
@@ -48,15 +50,17 @@ struct PlayersView: View {
                             .foregroundStyle(.red)
                             .accessibilityLabel("Duplicate player name. That player is already in your list.")
                     }
-                    Button {
-                        isNameFieldFocused = false
-                    } label: {
-                        Label("Done Adding Players", systemImage: "checkmark.circle.fill")
-                            .frame(maxWidth: .infinity)
+                    if let lastAddedPlayerName {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label("Added \(lastAddedPlayerName)", systemImage: "checkmark.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.grammyPurple)
+                            Text("Add another player or tap Done Adding Players.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .accessibilityHint("Dismisses the keyboard so you can review your saved players")
+                    doneAddingButton
                 }
                 Section("Saved Players") {
                     ForEach(activePlayers) { playerRow($0) }
@@ -95,8 +99,29 @@ struct PlayersView: View {
         guard !trimmedNewName.isEmpty, !hasDuplicateNewName else { return }
         context.insert(PlayerProfile(name: trimmedNewName))
         try? context.save()
+        lastAddedPlayerName = trimmedNewName
+        hasAddedPlayerThisVisit = true
         newName = ""
         isNameFieldFocused = true
+    }
+
+    @ViewBuilder private var doneAddingButton: some View {
+        let button = Button {
+            isNameFieldFocused = false
+            lastAddedPlayerName = nil
+            hasAddedPlayerThisVisit = false
+        } label: {
+            Text("Done Adding Players")
+                .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
+        .accessibilityHint("Dismisses the keyboard so you can review your saved players")
+
+        if hasAddedPlayerThisVisit {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button.buttonStyle(.bordered)
+        }
     }
 
     @ViewBuilder private func playerRow(_ player: PlayerProfile) -> some View {
