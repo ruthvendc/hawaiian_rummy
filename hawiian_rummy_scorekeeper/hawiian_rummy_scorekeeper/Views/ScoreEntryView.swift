@@ -9,6 +9,7 @@ struct ScoreEntryView: View {
     @State private var values: [UUID: String] = [:]
 
     private var definition: LevelDefinition { LevelDefinition.definition(for: levelNumber) }
+    private var isEditingExistingLevel: Bool { round.levels.contains { $0.levelNumber == levelNumber } }
     private var parsedScores: [UUID: Int]? {
         var result: [UUID: Int] = [:]
         for participant in round.participants {
@@ -26,16 +27,19 @@ struct ScoreEntryView: View {
                 }
                 Section("Scores") {
                     ForEach(round.orderedParticipants) { participant in
-                        TextField(participant.displayName, text: scoreBinding(for: participant))
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .accessibilityLabel("Score for \(participant.displayName)")
+                        HStack {
+                            Text(participant.displayName)
+                            TextField("Score", text: scoreBinding(for: participant))
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .accessibilityLabel("Score for \(participant.displayName)")
+                        }
                     }
                 }
             }
             .scrollContentBackground(.hidden)
             .background(Color.softPurpleBackground)
-            .navigationTitle("Enter Scores")
+            .navigationTitle(isEditingExistingLevel ? "Edit Scores" : "Enter Scores")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
@@ -53,7 +57,11 @@ struct ScoreEntryView: View {
 
     private func populateExistingScores() {
         guard let level = round.levels.first(where: { $0.levelNumber == levelNumber }) else { return }
-        for entry in level.entries where entry.participant != nil { values[entry.participant!.id] = String(entry.score) }
+        for entry in level.entries {
+            if let participant = entry.participant {
+                values[participant.id] = String(entry.score)
+            }
+        }
     }
 
     private func saveScores() {

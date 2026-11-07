@@ -36,6 +36,28 @@ final class Game {
 
     var isComplete: Bool { completedAt != nil }
     var sortedRounds: [GameRound] { rounds.sorted { $0.number < $1.number } }
+
+    static func defaultTitle(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE, MMM d, yyyy"
+        return formatter.string(from: date)
+    }
+
+    static func nextDefaultTitle(for date: Date, existingTitles: [String]) -> String {
+        let baseTitle = defaultTitle(for: date)
+        let numberedPrefix = "\(baseTitle) · Game "
+        let highestNumber = existingTitles.compactMap { title -> Int? in
+            if title == baseTitle { return 1 }
+            guard title.hasPrefix(numberedPrefix),
+                  let number = Int(title.dropFirst(numberedPrefix.count)),
+                  number >= 2 else { return nil }
+            return number
+        }.max()
+
+        guard let highestNumber else { return baseTitle }
+        return "\(numberedPrefix)\(highestNumber + 1)"
+    }
 }
 
 @Model

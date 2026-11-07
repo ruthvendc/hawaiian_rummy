@@ -9,6 +9,25 @@ struct GamesView: View {
     private var completedCount: Int { games.filter(\.isComplete).count }
     private var activeCount: Int { games.count - completedCount }
 
+    private func summary(for game: Game) -> String {
+        let playerCount = game.players.count
+        let playersLabel = "\(playerCount) \(playerCount == 1 ? "player" : "players")"
+        guard let completedAt = game.completedAt else { return "\(playersLabel) · In progress" }
+
+        let totalMinutes = max(0, Int(completedAt.timeIntervalSince(game.createdAt) / 60))
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        let duration: String
+        if hours > 0 {
+            duration = "\(hours) \(hours == 1 ? "hr" : "hrs") \(minutes) \(minutes == 1 ? "min" : "mins")"
+        } else if totalMinutes > 0 {
+            duration = "\(totalMinutes) \(totalMinutes == 1 ? "min" : "mins")"
+        } else {
+            duration = "Less than 1 min"
+        }
+        return "\(playersLabel) · Completed · \(duration)"
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -27,9 +46,13 @@ struct GamesView: View {
                     NavigationLink(value: game) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(game.title).font(.headline)
-                            Text(game.isComplete ? "Completed · \(game.rounds.count) rounds" : "In progress · Round \(game.rounds.count)")
+                            Text(summary(for: game))
                                 .foregroundStyle(.secondary)
-                            Text(game.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                            if game.title == "Family Game" {
+                                Text(game.createdAt, style: .date)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {

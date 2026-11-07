@@ -3,8 +3,7 @@ import SwiftData
 
 struct GameDetailView: View {
     @Environment(\.modelContext) private var context
-    @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var gameNight = GameNightCoordinator()
+    @EnvironmentObject private var gameNight: GameNightCoordinator
     @State private var scoreLevel = 1
     @State private var showingScoreEntry = false
     @State private var showEndConfirmation = false
@@ -19,6 +18,13 @@ struct GameDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                Toggle(isOn: $gameNight.isEnabled) {
+                    Label("Keep Screen On", systemImage: "display")
+                        .font(.headline)
+                }
+                .accessibilityHint("Prevents your phone from locking while this app is open.")
+                .padding()
+                .background(Color.grammyLavender.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
                 if game.isComplete {
                     GameFinalView(game: game)
                 } else if let round = currentRound {
@@ -57,22 +63,12 @@ struct GameDetailView: View {
         .confirmationDialog("End this game?", isPresented: $showEndConfirmation, titleVisibility: .visible) {
             Button("End Game", role: .destructive) {
                 game.completedAt = .now
-                gameNight.deactivate()
                 try? context.save()
             }
         } message: { Text("Saved scores, including any levels entered in the current round, will count in the final standings.") }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { gameNight.deactivate() } }
-        .onDisappear { gameNight.deactivate() }
     }
 
     @ViewBuilder private func activeContent(_ round: GameRound) -> some View {
-        Toggle(isOn: $gameNight.isEnabled) {
-            Label("Keep Screen On", systemImage: "display")
-                .font(.headline)
-        }
-        .accessibilityHint("Prevents your phone from locking while this game is active.")
-        .padding()
-        .background(Color.grammyLavender.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
         if round.isComplete {
             RoundCompletionView(game: game, round: round, endGame: { showEndConfirmation = true })
         } else {

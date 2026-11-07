@@ -2,6 +2,8 @@ import SwiftUI
 import SwiftData
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var gameNight = GameNightCoordinator()
     @State private var isShowingWelcome = true
 
     var body: some View {
@@ -13,6 +15,13 @@ struct ContentView: View {
             }
         }
         .tint(.grammyPurple)
+        .environmentObject(gameNight)
+        .onAppear {
+            gameNight.setSceneActive(scenePhase == .active)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            gameNight.setSceneActive(phase == .active)
+        }
     }
 }
 

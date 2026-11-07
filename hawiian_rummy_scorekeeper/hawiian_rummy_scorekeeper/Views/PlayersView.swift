@@ -10,6 +10,7 @@ struct PlayersView: View {
     @State private var rename = ""
     @State private var lastAddedPlayerName: String?
     @State private var hasAddedPlayerThisVisit = false
+    @State private var showingSaveError = false
     @FocusState private var isNameFieldFocused: Bool
 
     private var activePlayers: [PlayerProfile] { players.filter { !$0.isRetired } }
@@ -19,6 +20,7 @@ struct PlayersView: View {
             player.name.compare(trimmedNewName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }
     }
+    private var canAddPlayer: Bool { !trimmedNewName.isEmpty && !hasDuplicateNewName }
 
     var body: some View {
         NavigationStack {
@@ -32,23 +34,25 @@ struct PlayersView: View {
                     .listRowBackground(Color.clear)
                 }
                 Section("Add Player") {
-                    HStack {
-                        TextField("Name", text: $newName)
-                            .textInputAutocapitalization(.words)
-                            .focused($isNameFieldFocused)
-                            .onSubmit(addPlayer)
-                            .accessibilityLabel("New player name")
-                        Button(action: addPlayer) {
-                            Text("Add Player")
-                        }
-                        .disabled(trimmedNewName.isEmpty || hasDuplicateNewName)
-                        .accessibilityHint("Saves this player and lets you add another name")
+                    TextField("Enter New Player Name", text: $newName)
+                        .textInputAutocapitalization(.words)
+                        .focused($isNameFieldFocused)
+                        .onSubmit(addPlayer)
+                        .accessibilityLabel("New player name")
+                    Button(action: addPlayer) {
+                        Text("Add Player")
+                            .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!canAddPlayer)
+                    .opacity(canAddPlayer ? 1 : 0.6)
+                    .listRowSeparator(.hidden)
+                    .accessibilityHint("Saves this player and lets you add another name")
                     if hasDuplicateNewName {
-                        Label("That player is already in your list.", systemImage: "exclamationmark.circle.fill")
+                        Text("That player is already in your list.")
                             .font(.footnote)
-                            .foregroundStyle(.red)
-                            .accessibilityLabel("Duplicate player name. That player is already in your list.")
+                            .foregroundStyle(.secondary)
                     }
                     if let lastAddedPlayerName {
                         VStack(alignment: .leading, spacing: 3) {
@@ -73,6 +77,11 @@ struct PlayersView: View {
             .navigationTitle("Players")
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .alert("Couldn't save player", isPresented: $showingSaveError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Please try adding this player again.")
+            }
             .alert("Rename Player", isPresented: Binding(get: { editingPlayer != nil }, set: { if !$0 { editingPlayer = nil } })) {
                 TextField("Name", text: $rename)
                 Button("Cancel", role: .cancel) { editingPlayer = nil }
@@ -96,13 +105,19 @@ struct PlayersView: View {
     }
 
     private func addPlayer() {
-        guard !trimmedNewName.isEmpty, !hasDuplicateNewName else { return }
-        context.insert(PlayerProfile(name: trimmedNewName))
-        try? context.save()
-        lastAddedPlayerName = trimmedNewName
-        hasAddedPlayerThisVisit = true
-        newName = ""
-        isNameFieldFocused = true
+        guard canAddPlayer else { return }
+        let player = PlayerProfile(name: trimmedNewName)
+        context.insert(player)
+        do {
+            try context.save()
+            lastAddedPlayerName = trimmedNewName
+            hasAddedPlayerThisVisit = true
+            newName = ""
+            isNameFieldFocused = true
+        } catch {
+            context.delete(player)
+            showingSaveError = true
+        }
     }
 
     @ViewBuilder private var doneAddingButton: some View {
