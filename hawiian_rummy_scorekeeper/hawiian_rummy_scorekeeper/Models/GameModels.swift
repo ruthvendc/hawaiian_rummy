@@ -7,14 +7,24 @@ final class PlayerProfile {
     var name: String
     var createdAt: Date
     var retiredAt: Date?
+    var displayOrder: Int?
 
     init(name: String) {
         self.id = UUID()
         self.name = name
         self.createdAt = .now
+        self.displayOrder = nil
     }
 
     var isRetired: Bool { retiredAt != nil }
+
+    static func orderedActivePlayers(_ players: [PlayerProfile]) -> [PlayerProfile] {
+        players.filter { !$0.isRetired }.sorted { left, right in
+            let leftOrder = left.displayOrder ?? Int.max
+            let rightOrder = right.displayOrder ?? Int.max
+            return leftOrder == rightOrder ? left.name < right.name : leftOrder < rightOrder
+        }
+    }
 }
 
 @Model

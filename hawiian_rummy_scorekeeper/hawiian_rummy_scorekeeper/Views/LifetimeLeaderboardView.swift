@@ -70,6 +70,7 @@ struct LifetimeLeaderboardView: View {
             .listSectionSpacing(10)
             .background(Color.softPurpleBackground)
             .navigationTitle("Family Records")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }

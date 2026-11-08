@@ -129,6 +129,7 @@ struct RulesView: View {
             }
             .background(Color.softPurpleBackground)
             .navigationTitle("Rules")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }

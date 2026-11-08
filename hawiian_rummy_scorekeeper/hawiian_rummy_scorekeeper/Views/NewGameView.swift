@@ -11,9 +11,10 @@ struct NewGameView: View {
     @State private var customTitle: String?
     @State private var showingSaveError = false
     @FocusState private var isNameFieldFocused: Bool
+    @ScaledMetric(relativeTo: .body) private var selectionBadgeSize: CGFloat = 34
     let onStart: (Game) -> Void
 
-    private var availablePlayers: [PlayerProfile] { players.filter { !$0.isRetired } }
+    private var availablePlayers: [PlayerProfile] { PlayerProfile.orderedActivePlayers(players) }
     private var trimmedNewPlayerName: String { newPlayerName.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var hasDuplicateNewName: Bool {
         availablePlayers.contains {
@@ -42,53 +43,34 @@ struct NewGameView: View {
                 } header: {
                     Text("Game")
                 } footer: {
-                    Text("The date is the default name. Tap above to give this game a different name.")
-                }
-                Section("Add New Players") {
-                    Text("You need at least two players to start.")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.primary)
-                    TextField("Enter New Player Name", text: $newPlayerName)
-                        .textInputAutocapitalization(.words)
-                        .focused($isNameFieldFocused)
-                        .onSubmit(addPlayer)
-                        .accessibilityLabel("New player name")
-                    Button(action: addPlayer) {
-                        Text("Add Player")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(!canAddPlayer)
-                    .opacity(canAddPlayer ? 1 : 0.6)
-                    .listRowSeparator(.hidden)
-                    if hasDuplicateNewName {
-                        Text("That player is already in your list. Select them below.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("Optional: Tap to rename this game.")
                 }
                 Section("Select Players") {
-                    Text("Tap players in the order you want to keep score.")
+                    Text("Select players in scoring order.")
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(.primary)
                     if availablePlayers.isEmpty {
-                        Text("Players you add above will appear here.")
+                        Text("Players you add below will appear here.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                     ForEach(availablePlayers) { player in
+                        let position = selectedIDs.firstIndex(of: player.id)
                         HStack {
+                            ZStack {
+                                if let position {
+                                    Circle()
+                                        .fill(Color.grammyLavender)
+                                    Text("\(position + 1)")
+                                        .font(.subheadline.weight(.bold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(Color.grammyPurple)
+                                        .accessibilityLabel("Score entry position \(position + 1)")
+                                }
+                            }
+                            .frame(width: selectionBadgeSize, height: selectionBadgeSize)
                             Text(player.name)
                             Spacer()
-                            if let position = selectedIDs.firstIndex(of: player.id) {
-                                Text("\(position + 1)")
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(Color.grammyPurple)
-                                    .frame(width: 24, height: 24)
-                                    .background(Color.grammyLavender, in: Circle())
-                                    .accessibilityLabel("Score entry position \(position + 1)")
-                            }
                             Toggle("Select \(player.name)", isOn: Binding(
                                 get: { selectedIDs.contains(player.id) },
                             set: { selected in
@@ -103,8 +85,33 @@ struct NewGameView: View {
                         }
                     }
                 }
+                Section("Add New Players") {
+                    Text("You need at least two players to start.")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.primary)
+                    TextField("Enter New Player Name", text: $newPlayerName)
+                        .textInputAutocapitalization(.words)
+                        .focused($isNameFieldFocused)
+                        .onSubmit(addPlayer)
+                        .accessibilityLabel("New player name")
+                    Button(action: addPlayer) {
+                        Text("Add Player")
+                            .foregroundStyle(canAddPlayer ? Color.white : Color.primary)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!canAddPlayer)
+                    .listRowSeparator(.hidden)
+                    if hasDuplicateNewName {
+                        Text("That player is already in your list. Select them above.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
+            .listSectionSpacing(10)
             .background(Color.softPurpleBackground)
             .navigationTitle("New Game")
             .alert("Couldn't save player", isPresented: $showingSaveError) {
@@ -115,13 +122,16 @@ struct NewGameView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Start Game") {
+                    Button {
                         let trimmedTitle = (customTitle ?? suggestedTitle).trimmingCharacters(in: .whitespacesAndNewlines)
                         let game = Game(title: trimmedTitle.isEmpty ? suggestedTitle : trimmedTitle, players: selection)
                         context.insert(game)
                         _ = GameRules.createRound(in: game)
                         try? context.save()
                         onStart(game)
+                    } label: {
+                        Text("Start Game")
+                            .foregroundStyle(selection.count < 2 ? Color.primary : Color.accentColor)
                     }
                     .disabled(selection.count < 2)
                 }

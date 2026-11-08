@@ -65,6 +65,7 @@ struct GamesView: View {
             .listSectionSpacing(10)
             .background(Color.softPurpleBackground)
             .navigationTitle("Games")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(for: Game.self) { GameDetailView(game: $0) }
