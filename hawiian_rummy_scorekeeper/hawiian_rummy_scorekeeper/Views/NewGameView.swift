@@ -85,29 +85,37 @@ struct NewGameView: View {
                         }
                     }
                 }
-                Section("Add New Players") {
-                    Text("You need at least two players to start.")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.primary)
-                    TextField("Enter New Player Name", text: $newPlayerName)
-                        .textInputAutocapitalization(.words)
-                        .focused($isNameFieldFocused)
-                        .onSubmit(addPlayer)
-                        .accessibilityLabel("New player name")
-                    Button(action: addPlayer) {
-                        Text("Add Player")
-                            .foregroundStyle(canAddPlayer ? Color.white : Color.primary)
-                            .frame(maxWidth: .infinity)
+                Section {
+                    VStack(alignment: .leading, spacing: 20) {
+                        TextField("Enter New Player Name", text: $newPlayerName)
+                            .textInputAutocapitalization(.words)
+                            .focused($isNameFieldFocused)
+                            .onSubmit(addPlayer)
+                            .accessibilityLabel("New player name")
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 14)
+                            .background(Color(uiColor: .secondarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        Button(action: addPlayer) {
+                            Text("Add Player")
+                                .foregroundStyle(canAddPlayer ? Color.white : Color.primary)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(!canAddPlayer)
+                        .accessibilityHint("Saves and selects this player for the game")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(!canAddPlayer)
+                    .listRowInsets(EdgeInsets(top: 14, leading: 16, bottom: 18, trailing: 16))
                     .listRowSeparator(.hidden)
                     if hasDuplicateNewName {
                         Text("That player is already in your list. Select them above.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                } header: {
+                    Text("Add Player")
+                } footer: {
+                    Text("You need at least two players to start.")
                 }
             }
             .scrollContentBackground(.hidden)
