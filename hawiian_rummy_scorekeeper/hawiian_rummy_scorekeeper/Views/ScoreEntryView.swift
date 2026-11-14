@@ -7,12 +7,14 @@ struct ScoreEntryView: View {
     let round: GameRound
     let levelNumber: Int
     @State private var values: [UUID: String] = [:]
+    @State private var showingSaveError = false
 
     private var definition: LevelDefinition { LevelDefinition.definition(for: levelNumber) }
-    private var isEditingExistingLevel: Bool { round.levels.contains { $0.levelNumber == levelNumber } }
+    private var isEditingExistingLevel: Bool { (round.levels ?? []).contains { $0.levelNumber == levelNumber } }
     private var parsedScores: [UUID: Int]? {
+        guard let participants = round.participants, !participants.isEmpty else { return nil }
         var result: [UUID: Int] = [:]
-        for participant in round.participants {
+        for participant in participants {
             guard let value = values[participant.id], let score = Int(value), score >= 0 else { return nil }
             result[participant.id] = score
         }
@@ -48,6 +50,11 @@ struct ScoreEntryView: View {
                 }
             }
             .onAppear(perform: populateExistingScores)
+            .alert("Couldn't save scores", isPresented: $showingSaveError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Your entries are still here. Please try saving again.")
+            }
         }
     }
 
@@ -56,8 +63,8 @@ struct ScoreEntryView: View {
     }
 
     private func populateExistingScores() {
-        guard let level = round.levels.first(where: { $0.levelNumber == levelNumber }) else { return }
-        for entry in level.entries {
+        guard let level = round.levels?.first(where: { $0.levelNumber == levelNumber }) else { return }
+        for entry in level.entries ?? [] {
             if let participant = entry.participant {
                 values[participant.id] = String(entry.score)
             }
@@ -66,7 +73,12 @@ struct ScoreEntryView: View {
 
     private func saveScores() {
         guard let parsedScores else { return }
-        GameRules.save(scores: parsedScores, for: levelNumber, in: round, context: context)
-        dismiss()
+        do {
+            try GameRules.save(scores: parsedScores, for: levelNumber, in: round, context: context)
+            dismiss()
+        } catch {
+            context.rollback()
+            showingSaveError = true
+        }
     }
 }

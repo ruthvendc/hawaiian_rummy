@@ -30,19 +30,19 @@ struct Standing: Identifiable {
 
 enum GameRules {
     static func score(for participant: RoundParticipant, in round: GameRound) -> Int {
-        round.levels.flatMap(\.entries)
+        (round.levels ?? []).flatMap { $0.entries ?? [] }
             .filter { $0.participant?.id == participant.id }
             .reduce(0) { $0 + $1.score }
     }
 
     static func score(for player: PlayerProfile, in game: Game) -> Int {
-        game.rounds.flatMap(\.levels).flatMap(\.entries)
+        (game.rounds ?? []).flatMap { $0.levels ?? [] }.flatMap { $0.entries ?? [] }
             .filter { $0.participant?.player?.id == player.id }
             .reduce(0) { $0 + $1.score }
     }
 
     static func standings(for round: GameRound) -> [Standing] {
-        let sorted = round.participants.sorted {
+        let sorted = (round.participants ?? []).sorted {
             let left = score(for: $0, in: round)
             let right = score(for: $1, in: round)
             return left == right ? $0.displayName < $1.displayName : left < right
@@ -58,7 +58,7 @@ enum GameRules {
 
     static func gameStandings(for game: Game) -> [(PlayerProfile, Int, Int)] {
         var ordered: [(player: PlayerProfile, total: Int)] = []
-        for player in game.players {
+        for player in game.players ?? [] {
             ordered.append((player: player, total: score(for: player, in: game)))
         }
         ordered.sort { left, right in
@@ -73,26 +73,27 @@ enum GameRules {
     }
 
     static func createRound(in game: Game) -> GameRound {
-        let roster = game.sortedRounds.first?.orderedParticipants.compactMap(\.player) ?? game.players
-        let round = GameRound(number: game.rounds.count + 1, game: game, players: roster)
-        game.rounds.append(round)
+        let roster = game.sortedRounds.first?.orderedParticipants.compactMap(\.player) ?? (game.players ?? [])
+        let round = GameRound(number: (game.rounds?.count ?? 0) + 1, game: game, players: roster)
+        game.rounds = (game.rounds ?? []) + [round]
         return round
     }
 
-    static func save(scores: [UUID: Int], for levelNumber: Int, in round: GameRound, context: ModelContext) {
-        if let existing = round.levels.first(where: { $0.levelNumber == levelNumber }) {
-            existing.entries.forEach(context.delete)
+    static func save(scores: [UUID: Int], for levelNumber: Int, in round: GameRound, context: ModelContext) throws {
+        if let existing = round.levels?.first(where: { $0.levelNumber == levelNumber }) {
+            let previousEntries = existing.entries ?? []
             existing.entries = round.orderedParticipants.compactMap { participant in
                 scores[participant.id].map { ScoreEntry(score: $0, participant: participant) }
             }
+            previousEntries.forEach(context.delete)
         } else {
             let level = LevelResult(levelNumber: levelNumber)
             level.entries = round.orderedParticipants.compactMap { participant in
                 scores[participant.id].map { ScoreEntry(score: $0, participant: participant) }
             }
-            round.levels.append(level)
+            round.levels = (round.levels ?? []) + [level]
         }
-        if round.levels.count == LevelDefinition.all.count { round.completedAt = .now }
-        try? context.save()
+        if round.levels?.count == LevelDefinition.all.count { round.completedAt = .now }
+        try context.save()
     }
 }

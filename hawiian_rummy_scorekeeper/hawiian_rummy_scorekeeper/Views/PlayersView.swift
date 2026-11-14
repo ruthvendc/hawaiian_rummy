@@ -10,6 +10,7 @@ struct PlayersView: View {
     @State private var rename = ""
     @State private var showingSaveError = false
     @State private var showingOrderSaveError = false
+    @State private var showingEditSaveError = false
     @State private var editMode: EditMode = .inactive
     @State private var orderedPlayerIDs: [UUID] = []
     @FocusState private var isNameFieldFocused: Bool
@@ -57,12 +58,17 @@ struct PlayersView: View {
             } message: {
                 Text("Please try tapping Done again.")
             }
+            .alert("Couldn't update player", isPresented: $showingEditSaveError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Your change wasn't saved. Please try again.")
+            }
             .alert("Rename Player", isPresented: Binding(get: { editingPlayer != nil }, set: { if !$0 { editingPlayer = nil } })) {
                 TextField("Name", text: $rename)
                 Button("Cancel", role: .cancel) { editingPlayer = nil }
                 Button("Save") {
                     editingPlayer?.name = rename.trimmingCharacters(in: .whitespacesAndNewlines)
-                    try? context.save()
+                    savePlayerChange()
                     editingPlayer = nil
                 }
             }
@@ -70,7 +76,7 @@ struct PlayersView: View {
                 Button("Cancel", role: .cancel) { playerToRemove = nil }
                 Button("Remove", role: .destructive) {
                     playerToRemove?.retiredAt = .now
-                    try? context.save()
+                    savePlayerChange()
                     playerToRemove = nil
                 }
             } message: {
@@ -160,6 +166,15 @@ struct PlayersView: View {
         } catch {
             context.delete(player)
             showingSaveError = true
+        }
+    }
+
+    private func savePlayerChange() {
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            showingEditSaveError = true
         }
     }
 

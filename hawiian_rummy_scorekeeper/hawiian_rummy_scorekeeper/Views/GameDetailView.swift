@@ -9,6 +9,7 @@ struct GameDetailView: View {
     @State private var showEndConfirmation = false
     @State private var showingRename = false
     @State private var renamedTitle = ""
+    @State private var showingSaveError = false
     let game: Game
 
     /// The latest round remains the active dashboard until the family starts another
@@ -56,23 +57,28 @@ struct GameDetailView: View {
                 let title = renamedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !title.isEmpty else { return }
                 game.title = title
-                try? context.save()
+                saveChanges()
             }
             .disabled(renamedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .confirmationDialog("End this game?", isPresented: $showEndConfirmation, titleVisibility: .visible) {
             Button("End Game", role: .destructive) {
                 game.completedAt = .now
-                try? context.save()
+                saveChanges()
             }
         } message: { Text("Saved scores, including any levels entered in the current round, will count in the final standings.") }
+        .alert("Couldn't save game", isPresented: $showingSaveError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Your last change wasn't saved. Please try again.")
+        }
     }
 
     @ViewBuilder private func activeContent(_ round: GameRound) -> some View {
         if round.isComplete {
             RoundCompletionView(game: game, round: round, endGame: { showEndConfirmation = true })
         } else {
-            let nextLevel = round.levels.count + 1
+            let nextLevel = (round.levels?.count ?? 0) + 1
             let definition = LevelDefinition.definition(for: nextLevel)
             LevelMissionCard(roundNumber: round.number, handNumber: nextLevel, definition: definition)
             if nextLevel == 7 {
@@ -84,7 +90,7 @@ struct GameDetailView: View {
             Button { scoreLevel = nextLevel; showingScoreEntry = true } label: { Label("Enter Scores", systemImage: "square.and.pencil").frame(maxWidth: .infinity) }
                 .buttonStyle(.borderedProminent).controlSize(.large)
             standingsCard(round)
-            if let previous = round.levels.map(\.levelNumber).max() {
+            if let previous = round.levels?.map(\.levelNumber).max() {
                 Button("Edit Previous Level") { scoreLevel = previous; showingScoreEntry = true }
                     .frame(maxWidth: .infinity).buttonStyle(.bordered)
             }
@@ -111,6 +117,15 @@ struct GameDetailView: View {
             }
         }
         .padding().background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func saveChanges() {
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            showingSaveError = true
+        }
     }
 }
 
@@ -158,6 +173,7 @@ private struct LevelMissionCard: View {
 
 private struct RoundCompletionView: View {
     @Environment(\.modelContext) private var context
+    @State private var showingSaveError = false
     let game: Game
     let round: GameRound
     let endGame: () -> Void
@@ -166,14 +182,28 @@ private struct RoundCompletionView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Round \(round.number) complete!").font(.title.bold())
             Text("The round is in the books. Would you like to keep playing?").foregroundStyle(.secondary)
-            Button { _ = GameRules.createRound(in: game); try? context.save() } label: {
+            Button {
+                _ = GameRules.createRound(in: game)
+                do {
+                    try context.save()
+                } catch {
+                    context.rollback()
+                    showingSaveError = true
+                }
+            } label: {
                 Label("Play Another Round", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent).controlSize(.large)
+            .disabled(round.orderedParticipants.isEmpty)
             Button("End Game", role: .destructive, action: endGame)
                 .frame(maxWidth: .infinity).buttonStyle(.bordered)
             RoundResultsView(round: round)
             OverallStandingsView(game: game, title: "Overall Through Round \(round.number)")
+        }
+        .alert("Couldn't start another round", isPresented: $showingSaveError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("The new round wasn't saved. Please try again.")
         }
     }
 }

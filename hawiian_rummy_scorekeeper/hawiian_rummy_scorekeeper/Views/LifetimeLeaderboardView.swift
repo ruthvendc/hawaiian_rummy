@@ -6,16 +6,16 @@ struct LifetimeLeaderboardView: View {
     @Query private var games: [Game]
 
     private var completedGames: [Game] { games.filter(\.isComplete) }
-    private var completedRounds: [GameRound] { games.flatMap(\.rounds).filter(\.isComplete) }
+    private var completedRounds: [GameRound] { games.flatMap { $0.rounds ?? [] }.filter(\.isComplete) }
 
     private var rows: [LifetimeRow] {
         players.compactMap { player in
             let playerRounds = completedRounds.filter { round in
-                round.participants.contains { $0.player?.id == player.id }
+                (round.participants ?? []).contains { $0.player?.id == player.id }
             }
             guard !playerRounds.isEmpty else { return nil }
             let scores = playerRounds.compactMap { round -> Int? in
-                guard let participant = round.participants.first(where: { $0.player?.id == player.id }) else { return nil }
+                guard let participant = round.participants?.first(where: { $0.player?.id == player.id }) else { return nil }
                 return GameRules.score(for: participant, in: round)
             }
             let roundWins = playerRounds.filter { round in
@@ -103,7 +103,7 @@ struct LifetimeLeaderboardView: View {
         var streaks: [UUID: Int] = [:]
         for row in rows {
             let playerRounds = completedRounds
-                .filter { $0.participants.contains { $0.player?.id == row.player.id } }
+                .filter { ($0.participants ?? []).contains { $0.player?.id == row.player.id } }
                 .sorted { $0.createdAt < $1.createdAt }
             var current = 0
             var longest = 0
@@ -119,7 +119,7 @@ struct LifetimeLeaderboardView: View {
 
     private var levelSevenRecord: RecordResult {
         let entries = completedRounds.flatMap { round in
-            round.levels.first(where: { $0.levelNumber == 7 })?.entries ?? []
+            round.levels?.first(where: { $0.levelNumber == 7 })?.entries ?? []
         }
         guard let value = entries.map(\.score).min() else { return RecordResult(detail: "No Level 7 scores yet") }
         let holderIDs = entries.filter { $0.score == value }.compactMap { $0.participant?.player?.id }

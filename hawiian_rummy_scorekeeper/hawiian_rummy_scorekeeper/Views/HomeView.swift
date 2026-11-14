@@ -22,7 +22,7 @@ struct HomeView: View {
                                 Label("Game in progress", systemImage: "play.circle.fill")
                                     .font(.headline)
                                 Text(game.title).font(.title3.bold())
-                                Text("Round \(game.rounds.count) · \(game.players.count) players")
+                                Text("Round \(game.rounds?.count ?? 0) · \(game.players?.count ?? 0) players")
                                     .foregroundStyle(.secondary)
                                 Text("Resume Game")
                                     .font(.headline)

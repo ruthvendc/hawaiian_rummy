@@ -36,11 +36,11 @@ struct LevelScoreMatrixView: View {
                         }
                     }
                     ForEach(LevelDefinition.all) { definition in
-                        let level = round.levels.first { $0.levelNumber == definition.number }
+                        let level = round.levels?.first { $0.levelNumber == definition.number }
                         HStack(spacing: 0) {
                             matrixCell("\(definition.number)", width: 70, emphasized: true)
                             ForEach(round.orderedParticipants) { participant in
-                                let score = level?.entries.first { $0.participant?.id == participant.id }?.score
+                                let score = level?.entries?.first { $0.participant?.id == participant.id }?.score
                                 matrixCell(score.map(String.init) ?? "—", width: 118, emphasized: false)
                             }
                         }
@@ -106,7 +106,7 @@ struct GameFinalView: View {
             if !standings.isEmpty {
                 Text(standings.filter { $0.2 == 1 }.map { $0.0.name }.joined(separator: " & ") + " won!")
                     .font(.title2.bold()).foregroundStyle(Color.grammyPurple)
-                Text("Lowest total score across \(game.rounds.count) rounds").foregroundStyle(.secondary)
+                Text("Lowest total score across \(game.rounds?.count ?? 0) rounds").foregroundStyle(.secondary)
             }
             OverallStandingsView(game: game, title: "Final Standings")
             Rectangle()

@@ -10,6 +10,7 @@ struct NewGameView: View {
     @State private var newPlayerName = ""
     @State private var customTitle: String?
     @State private var showingSaveError = false
+    @State private var showingGameSaveError = false
     @FocusState private var isNameFieldFocused: Bool
     @ScaledMetric(relativeTo: .body) private var selectionBadgeSize: CGFloat = 34
     let onStart: (Game) -> Void
@@ -127,6 +128,11 @@ struct NewGameView: View {
             } message: {
                 Text("Please try adding this player again.")
             }
+            .alert("Couldn't start game", isPresented: $showingGameSaveError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("The game wasn't saved. Please try again.")
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
@@ -135,8 +141,13 @@ struct NewGameView: View {
                         let game = Game(title: trimmedTitle.isEmpty ? suggestedTitle : trimmedTitle, players: selection)
                         context.insert(game)
                         _ = GameRules.createRound(in: game)
-                        try? context.save()
-                        onStart(game)
+                        do {
+                            try context.save()
+                            onStart(game)
+                        } catch {
+                            context.rollback()
+                            showingGameSaveError = true
+                        }
                     } label: {
                         Text("Start Game")
                             .foregroundStyle(selection.count < 2 ? Color.primary : Color.accentColor)

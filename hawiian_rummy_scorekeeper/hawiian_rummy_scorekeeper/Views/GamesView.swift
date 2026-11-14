@@ -4,13 +4,14 @@ import SwiftData
 struct GamesView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Game.createdAt, order: .reverse) private var games: [Game]
+    @State private var showingDeleteError = false
     @State private var gameToDelete: Game?
 
     private var completedCount: Int { games.filter(\.isComplete).count }
     private var activeCount: Int { games.count - completedCount }
 
     private func summary(for game: Game) -> String {
-        let playerCount = game.players.count
+        let playerCount = game.players?.count ?? 0
         let playersLabel = "\(playerCount) \(playerCount == 1 ? "player" : "players")"
         guard let completedAt = game.completedAt else { return "\(playersLabel) · In progress" }
 
@@ -74,12 +75,22 @@ struct GamesView: View {
                 Button("Delete Game", role: .destructive) {
                     if let gameToDelete {
                         context.delete(gameToDelete)
-                        try? context.save()
+                        do {
+                            try context.save()
+                        } catch {
+                            context.rollback()
+                            showingDeleteError = true
+                        }
                     }
                     gameToDelete = nil
                 }
             } message: {
                 Text("This permanently removes the game, its rounds, and its scores. Lifetime rankings will update automatically.")
+            }
+            .alert("Couldn't delete game", isPresented: $showingDeleteError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("The game was not deleted. Please try again.")
             }
         }
     }
