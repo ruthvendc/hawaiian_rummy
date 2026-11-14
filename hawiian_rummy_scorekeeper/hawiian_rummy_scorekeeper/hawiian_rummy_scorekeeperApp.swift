@@ -13,8 +13,12 @@ import CoreData
 
 @main
 struct hawiian_rummy_scorekeeperApp: App {
-    private static let cloudKitContainerID = "iCloud.com.davidruthven.hawiian-rummy-scorekeeper"
+    static let cloudKitContainerID = "iCloud.com.davidruthven.hawiian-rummy-scorekeeper"
     private let modelContainer: ModelContainer?
+    #if DEBUG
+    @UIApplicationDelegateAdaptor(CloudKitProbeAppDelegate.self) private var probeDelegate
+    @State private var probe = CloudKitProbe.shared
+    #endif
 
     init() {
         let schema = Schema([
@@ -39,6 +43,18 @@ struct hawiian_rummy_scorekeeperApp: App {
 
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            appContent.sheet(isPresented: $probe.isPresented) {
+                CloudKitProbeView(probe: probe)
+            }
+            #else
+            appContent
+            #endif
+        }
+    }
+
+    private var appContent: some View {
+        Group {
             if let modelContainer {
                 ContentView()
                     .modelContainer(modelContainer)

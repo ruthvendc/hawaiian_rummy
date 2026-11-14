@@ -41,6 +41,11 @@ struct HomeView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    #if DEBUG
+                    Button("CloudKit Sharing Probe") {
+                        CloudKitProbe.shared.isPresented = true
+                    }
+                    #endif
                 }
                 .padding()
             }
