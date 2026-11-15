@@ -261,11 +261,17 @@ final class CloudKitProbeAppDelegate: UIResponder, UIApplicationDelegate {
 
 final class CloudKitProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
-        if let metadata = options.cloudKitShareMetadata { CloudKitProbe.shared.receive(metadata) }
+        if let metadata = options.cloudKitShareMetadata { receive(metadata) }
     }
 
     func windowScene(_ windowScene: UIWindowScene, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
-        CloudKitProbe.shared.receive(metadata)
+        receive(metadata)
+    }
+
+    private func receive(_ metadata: CKShare.Metadata) {
+        if !GroupsModel.shared.receive(metadata) {
+            CloudKitProbe.shared.receive(metadata)
+        }
     }
 }
 #endif

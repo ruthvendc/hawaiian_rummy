@@ -16,6 +16,18 @@ extension Color {
         light: UIColor(red: 0.90, green: 0.84, blue: 0.96, alpha: 1),
         dark: UIColor(red: 0.31, green: 0.22, blue: 0.40, alpha: 1)
     )
+    static let grammySecondaryButtonSurface = adaptive(
+        light: UIColor(red: 0.97, green: 0.94, blue: 0.99, alpha: 1),
+        dark: UIColor(red: 0.38, green: 0.25, blue: 0.48, alpha: 1)
+    )
+    static let grammySecondaryButtonForeground = adaptive(
+        light: UIColor(red: 0.34, green: 0.16, blue: 0.50, alpha: 1),
+        dark: UIColor(red: 0.99, green: 0.97, blue: 1, alpha: 1)
+    )
+    static let grammySecondaryButtonBorder = adaptive(
+        light: UIColor(red: 0.53, green: 0.35, blue: 0.66, alpha: 1),
+        dark: UIColor(red: 0.71, green: 0.55, blue: 0.80, alpha: 1)
+    )
     static let warmGold = adaptive(
         light: UIColor(red: 0.82, green: 0.58, blue: 0.20, alpha: 1),
         dark: UIColor(red: 0.94, green: 0.71, blue: 0.32, alpha: 1)

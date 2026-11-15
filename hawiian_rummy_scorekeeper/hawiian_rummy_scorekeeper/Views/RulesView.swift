@@ -12,127 +12,125 @@ struct RulesView: View {
     ]
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    Text("A quick guide for playing together.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                Text("A quick guide for playing together.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
 
-                    RulesSection(title: "Goal of the Game", icon: "target", isInitiallyExpanded: true) {
-                        RuleText("The player with the lowest score at the end of all 7 hands wins.", emphasis: true)
-                        RuleText("Try to get rid of the cards in your hand because every card left is worth points.")
-                        RuleText("The fewer points you collect, the better!", emphasis: true)
+                RulesSection(title: "Goal of the Game", icon: "target", isInitiallyExpanded: true) {
+                    RuleText("The player with the lowest score at the end of all 7 hands wins.", emphasis: true)
+                    RuleText("Try to get rid of the cards in your hand because every card left is worth points.")
+                    RuleText("The fewer points you collect, the better!", emphasis: true)
+                }
+
+                RulesSection(title: "Card Values", icon: "suit.club.fill") {
+                    VStack(spacing: 0) {
+                        ValueRow(cards: "3 through 9", value: "5 points each")
+                        ValueRow(cards: "10, Jack, Queen, King", value: "10 points each")
+                        ValueRow(cards: "Ace", value: "15 points")
+                        ValueRow(cards: "2", value: "20 points")
+                        ValueRow(cards: "Joker", value: "50 points")
                     }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    RuleText("When someone goes out, the cards left in your hand are added to your score. Lower scores are better.")
+                }
 
-                    RulesSection(title: "Card Values", icon: "suit.club.fill") {
-                        VStack(spacing: 0) {
-                            ValueRow(cards: "3 through 9", value: "5 points each")
-                            ValueRow(cards: "10, Jack, Queen, King", value: "10 points each")
-                            ValueRow(cards: "Ace", value: "15 points")
-                            ValueRow(cards: "2", value: "20 points")
-                            ValueRow(cards: "Joker", value: "50 points")
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        RuleText("When someone goes out, the cards left in your hand are added to your score. Lower scores are better.")
-                    }
-
-                    RulesSection(title: "Wild Cards", icon: "sparkles") {
-                        RuleText("Twos and Jokers are wild cards.", emphasis: true)
-                        RuleText("A wild card can take the place of another card when making a Set or a Run.")
-                        CardExample(title: "Example Set", cards: ["K♥", "K♣", "2♠"], description: "The 2♠ can act as a King.")
-                        CardExample(title: "Example Run", cards: ["4♣", "5♣", "Joker", "7♣"], description: "The Joker can act as the 6♣.")
-                        RuleSubsection(title: "Wild Card Limit") {
-                            RuleText("For every 2 regular cards in a group, you may use 1 wild card.", emphasis: true)
-                            CardExample(title: "Example Set", cards: ["K♥", "K♦", "K♣", "Joker"], description: "The Joker acts as another King.")
-                            CardExample(title: "Example Run", cards: ["4♣", "5♣", "2♠", "7♣", "Joker", "9♣", "10♣"], description: "The 2♠ acts as the 6♣, and the Joker acts as the 8♣.")
-                        }
-                    }
-
-                    RulesSection(title: "Sets and Runs", icon: "rectangle.3.group.fill") {
-                        RuleSubsection(title: "Set") {
-                            RuleText("A Set is normally 3 cards with the same number or face.")
-                            CardExample(title: "Valid Set", cards: ["K♥", "K♣", "K♠"], description: "Suits do not matter in a Set.")
-                            CardExample(title: "Another Set", cards: ["7♥", "7♦", "7♣"], description: "Hearts, diamonds, clubs, and spades can be mixed.")
-                        }
-                        RuleSubsection(title: "Run") {
-                            RuleText("A Run is normally at least 4 cards in number order that are all the same suit.")
-                            CardExample(title: "Valid Run", cards: ["4♣", "5♣", "6♣", "7♣"], description: "Every card is a Club.")
-                            CardExample(title: "Not a Valid Run", cards: ["4♣", "5♣", "6♥", "7♣"], description: "This does not work because the 6 is a Heart instead of a Club.", isInvalid: true)
-                        }
-                        RuleText("Aces are high only and can only be used after a King.")
-                    }
-
-                    RulesSection(title: "How a Turn Works", icon: "arrow.triangle.2.circlepath") {
-                        TurnStep(number: 1, title: "Pick Up a Card", detail: "When it is your turn, choose one: take a new card from the pile or take the card just discarded.")
-                        TurnStep(number: 2, title: "Play Cards If You Can", detail: "Once you have completed this hand’s goal, you may lay those cards down. On subsequent turns, you may add cards to other players’ Sets and Runs already on the table.")
-                        TurnStep(number: 3, title: "Discard", detail: "Finish by discarding one card. Then it is the next player’s turn.")
-                        RuleSubsection(title: "Laying Down for the First Time") {
-                            RuleText("You may not put any cards on the table until you have completed the full goal for the current hand. For example, if the goal is 1 Run + 1 Set, you need both before putting down any cards.")
-                        }
-                        RuleSubsection(title: "Adding Cards to Groups on the Table") {
-                            RuleText("After you have laid down your own cards, on later turns you may add cards to a Set or Run already on the table—yours or another player’s. The card must correctly fit that group.")
-                            CardExample(title: "Adding to a Run", cards: ["4♣", "5♣", "6♣", "7♣", "8♣"], description: "A player who has laid down may add the 8♣.")
-                        }
-                    }
-
-                    RulesSection(title: "Buying a Card", icon: "cart.fill") {
-                        RuleText("Buying can help when you need cards to make a Set or Run. But extra cards can add points to your score at the end, so buy carefully.")
-                        RuleText("If you are not the next player and want the card that was just discarded, you must announce that you wish to buy it.", emphasis: true)
-                        RuleText("Players get a chance to buy in turn order. If no player before you wants the card, you must ask to buy it before the next player begins their turn.")
-                        RuleSubsection(title: "When You Buy a Card") {
-                            TurnStep(number: 1, title: "Pick Up the Discard", detail: "Take the card that was just discarded.")
-                            TurnStep(number: 2, title: "Pick Up 2 More Cards", detail: "Take 2 additional cards from the pile.")
-                        }
-                    }
-
-                    RulesSection(title: "The 7 Hands", icon: "7.circle.fill") {
-                        ForEach(hands) { hand in
-                            HandRuleCard(hand: hand)
-                        }
-                    }
-
-                    RulesSection(title: "Hand 7 Special Rule", icon: "exclamationmark.triangle.fill", accent: .warmGold) {
-                        RuleText("Every card in your hand must fit into your Sets and Run before you can lay down.", emphasis: true)
-                        RuleText("Hand 7 has no discard. You cannot lay down most of your cards and discard the last one.", emphasis: true)
-                        RuleText("If you pick up a card and it makes every card in your hand fit into your completed Sets and Run, lay down all of your cards. There is nothing to discard.")
-                        RuleText("During Hand 7, try to buy cards only when you really need them. Because you cannot discard at the end of a winning hand, extra cards can be hard to get rid of.")
-                        RuleText("Sets and Runs can be longer than their normal minimum sizes. A Set may have many cards of the same number or face, and a Run may have many cards in order of the same suit.")
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Example - minimum group pattern: 10 cards")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.secondary)
-                            Text("Set: K♥  K♦  K♣")
-                            Text("Set: 7♥  7♦  7♣")
-                            Text("Run: 4♣  5♣  6♣  7♣")
-                            Text("Hand 7 deals 12 cards, so every other card must be added to one of these groups before you lay down.")
-                                .font(.caption)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Divider()
-                                .padding(.vertical, 6)
-                            Text("Example — longer groups using wild cards")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.secondary)
-                            Text("Set: K♥  K♦  K♣  K♠  2♠")
-                            Text("Set: 7♥  7♦  7♣  Joker")
-                            Text("Run: 4♣  5♣  2♦  7♣  Joker  9♣  10♣  J♣  Q♣")
-                        }
-                        .font(.subheadline.weight(.medium))
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.grammyDecorativeSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        RuleText("Every card in your hand must have a place before you can go down.", emphasis: true)
+                RulesSection(title: "Wild Cards", icon: "sparkles") {
+                    RuleText("Twos and Jokers are wild cards.", emphasis: true)
+                    RuleText("A wild card can take the place of another card when making a Set or a Run.")
+                    CardExample(title: "Example Set", cards: ["K♥", "K♣", "2♠"], description: "The 2♠ can act as a King.")
+                    CardExample(title: "Example Run", cards: ["4♣", "5♣", "Joker", "7♣"], description: "The Joker can act as the 6♣.")
+                    RuleSubsection(title: "Wild Card Limit") {
+                        RuleText("For every 2 regular cards in a group, you may use 1 wild card.", emphasis: true)
+                        CardExample(title: "Example Set", cards: ["K♥", "K♦", "K♣", "Joker"], description: "The Joker acts as another King.")
+                        CardExample(title: "Example Run", cards: ["4♣", "5♣", "2♠", "7♣", "Joker", "9♣", "10♣"], description: "The 2♠ acts as the 6♣, and the Joker acts as the 8♣.")
                     }
                 }
-                .padding(.vertical, 8)
+
+                RulesSection(title: "Sets and Runs", icon: "rectangle.3.group.fill") {
+                    RuleSubsection(title: "Set") {
+                        RuleText("A Set is normally 3 cards with the same number or face.")
+                        CardExample(title: "Valid Set", cards: ["K♥", "K♣", "K♠"], description: "Suits do not matter in a Set.")
+                        CardExample(title: "Another Set", cards: ["7♥", "7♦", "7♣"], description: "Hearts, diamonds, clubs, and spades can be mixed.")
+                    }
+                    RuleSubsection(title: "Run") {
+                        RuleText("A Run is normally at least 4 cards in number order that are all the same suit.")
+                        CardExample(title: "Valid Run", cards: ["4♣", "5♣", "6♣", "7♣"], description: "Every card is a Club.")
+                        CardExample(title: "Not a Valid Run", cards: ["4♣", "5♣", "6♥", "7♣"], description: "This does not work because the 6 is a Heart instead of a Club.", isInvalid: true)
+                    }
+                    RuleText("Aces are high only and can only be used after a King.")
+                }
+
+                RulesSection(title: "How a Turn Works", icon: "arrow.triangle.2.circlepath") {
+                    TurnStep(number: 1, title: "Pick Up a Card", detail: "When it is your turn, choose one: take a new card from the pile or take the card just discarded.")
+                    TurnStep(number: 2, title: "Play Cards If You Can", detail: "Once you have completed this hand’s goal, you may lay those cards down. On subsequent turns, you may add cards to other players’ Sets and Runs already on the table.")
+                    TurnStep(number: 3, title: "Discard", detail: "Finish by discarding one card. Then it is the next player’s turn.")
+                    RuleSubsection(title: "Laying Down for the First Time") {
+                        RuleText("You may not put any cards on the table until you have completed the full goal for the current hand. For example, if the goal is 1 Run + 1 Set, you need both before putting down any cards.")
+                    }
+                    RuleSubsection(title: "Adding Cards to Groups on the Table") {
+                        RuleText("After you have laid down your own cards, on later turns you may add cards to a Set or Run already on the table—yours or another player’s. The card must correctly fit that group.")
+                        CardExample(title: "Adding to a Run", cards: ["4♣", "5♣", "6♣", "7♣", "8♣"], description: "A player who has laid down may add the 8♣.")
+                    }
+                }
+
+                RulesSection(title: "Buying a Card", icon: "cart.fill") {
+                    RuleText("Buying can help when you need cards to make a Set or Run. But extra cards can add points to your score at the end, so buy carefully.")
+                    RuleText("If you are not the next player and want the card that was just discarded, you must announce that you wish to buy it.", emphasis: true)
+                    RuleText("Players get a chance to buy in turn order. If no player before you wants the card, you must ask to buy it before the next player begins their turn.")
+                    RuleSubsection(title: "When You Buy a Card") {
+                        TurnStep(number: 1, title: "Pick Up the Discard", detail: "Take the card that was just discarded.")
+                        TurnStep(number: 2, title: "Pick Up 2 More Cards", detail: "Take 2 additional cards from the pile.")
+                    }
+                }
+
+                RulesSection(title: "The 7 Hands", icon: "7.circle.fill") {
+                    ForEach(hands) { hand in
+                        HandRuleCard(hand: hand)
+                    }
+                }
+
+                RulesSection(title: "Hand 7 Special Rule", icon: "exclamationmark.triangle.fill", accent: .warmGold) {
+                    RuleText("Every card in your hand must fit into your Sets and Run before you can lay down.", emphasis: true)
+                    RuleText("Hand 7 has no discard. You cannot lay down most of your cards and discard the last one.", emphasis: true)
+                    RuleText("If you pick up a card and it makes every card in your hand fit into your completed Sets and Run, lay down all of your cards. There is nothing to discard.")
+                    RuleText("During Hand 7, try to buy cards only when you really need them. Because you cannot discard at the end of a winning hand, extra cards can be hard to get rid of.")
+                    RuleText("Sets and Runs can be longer than their normal minimum sizes. A Set may have many cards of the same number or face, and a Run may have many cards in order of the same suit.")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Example - minimum group pattern: 10 cards")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                        Text("Set: K♥  K♦  K♣")
+                        Text("Set: 7♥  7♦  7♣")
+                        Text("Run: 4♣  5♣  6♣  7♣")
+                        Text("Hand 7 deals 12 cards, so every other card must be added to one of these groups before you lay down.")
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Divider()
+                            .padding(.vertical, 6)
+                        Text("Example — longer groups using wild cards")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                        Text("Set: K♥  K♦  K♣  K♠  2♠")
+                        Text("Set: 7♥  7♦  7♣  Joker")
+                        Text("Run: 4♣  5♣  2♦  7♣  Joker  9♣  10♣  J♣  Q♣")
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.grammyDecorativeSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    RuleText("Every card in your hand must have a place before you can go down.", emphasis: true)
+                }
             }
-            .background(Color.softPurpleBackground)
-            .navigationTitle("Rules")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
+            .padding(.vertical, 8)
         }
+        .background(Color.softPurpleBackground)
+        .navigationTitle("Rules")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color.softPurpleBackground, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
     }
 }
 
@@ -364,5 +362,5 @@ private struct HandRuleCard: View {
 }
 
 #Preview {
-    RulesView()
+    NavigationStack { RulesView() }
 }

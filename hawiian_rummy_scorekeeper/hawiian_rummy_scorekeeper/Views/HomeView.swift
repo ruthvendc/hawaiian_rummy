@@ -42,8 +42,27 @@ struct HomeView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     #if DEBUG
-                    Button("CloudKit Sharing Probe") {
-                        CloudKitProbe.shared.isPresented = true
+                    NavigationLink {
+                        RulesView()
+                    } label: {
+                        Label("How to Play", systemImage: "book.closed")
+                            .foregroundStyle(Color.grammySecondaryButtonForeground)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.large)
+                    .tint(.grammySecondaryButtonSurface)
+                    .overlay {
+                        Capsule()
+                            .strokeBorder(Color.grammySecondaryButtonBorder, lineWidth: 1)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                    if ProcessInfo.processInfo.arguments.contains("-ShowCloudKitProbe") {
+                        Button("CloudKit Sharing Probe") {
+                            CloudKitProbe.shared.isPresented = true
+                        }
                     }
                     #endif
                 }
