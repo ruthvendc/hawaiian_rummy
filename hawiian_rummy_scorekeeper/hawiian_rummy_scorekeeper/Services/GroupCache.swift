@@ -7,6 +7,19 @@ struct GroupCacheSnapshot: Codable, Equatable {
     var pendingLinks: [URL] = []
     // Optional so previously saved snapshots decode without a migration.
     var memberNameDrafts: [UUID: String]?
+    var groupDetails: [UUID: CachedGroupDetails]?
+}
+
+// Display-only data. Cached membership never supplies CloudKit authorization or actions.
+struct CachedGroupDetails: Codable, Equatable {
+    struct Member: Codable, Equatable, Identifiable {
+        let id: String
+        let name: String
+        let role: String?
+    }
+
+    let members: [Member]
+    let savedAt: Date
 }
 
 @Model

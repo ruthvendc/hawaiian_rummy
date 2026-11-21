@@ -3,10 +3,11 @@ import SwiftData
 
 struct HomeView: View {
     @Query(sort: \Game.createdAt, order: .reverse) private var games: [Game]
+    @Environment(\.personalDeletionTargets) private var deletionTargets
     @State private var showingNewGame = false
     @State private var gameToOpen: Game?
 
-    private var activeGame: Game? { games.first { !$0.isComplete } }
+    private var activeGame: Game? { games.first { !$0.isComplete && !deletionTargets.games.contains($0.id) } }
 
     var body: some View {
         NavigationStack {

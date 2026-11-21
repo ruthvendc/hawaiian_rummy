@@ -40,6 +40,23 @@ struct GroupDetails {
             cloudKit: participant.userIdentity.nameComponents?.formatted()
         )
     }
+
+    var cachedDetails: CachedGroupDetails {
+        let participants = [share.owner] + members
+        return CachedGroupDetails(members: participants.map { participant in
+            let isYou = isCurrentUser(participant)
+            let role = participant.role == .owner ? "Owner" :
+                participant.acceptanceStatus == .accepted ? "Member" : "Invited"
+            let fallback = participant.role == .owner ? "Group Owner" :
+                participant.acceptanceStatus == .accepted ? "Member" : "Invited Member"
+            let name = displayName(for: participant)
+            return CachedGroupDetails.Member(
+                id: participant.participantID,
+                name: name.map { isYou ? "\($0) (You)" : $0 } ?? (isYou ? "You" : fallback),
+                role: name != nil || isYou ? role : nil
+            )
+        }, savedAt: .now)
+    }
 }
 
 enum GroupMembershipChange {
@@ -152,10 +169,8 @@ struct GroupRepository {
     }
 
     func details(for group: GroupSummary) async throws -> GroupDetails {
-        let database = database(for: group)
-        let root = try await database.record(for: rootID(for: group))
-        guard let shareID = root.share?.recordID,
-              let share = try await database.record(for: shareID) as? CKShare,
+        let (root, fetchedShare) = try await groupShare(for: group)
+        guard let share = fetchedShare,
               share.publicPermission == .none,
               let participant = share.currentUserParticipant,
               participant.acceptanceStatus == .accepted || participant.role == .owner,
@@ -175,6 +190,53 @@ struct GroupRepository {
         return try GroupDetails(
             group: summary(for: root, isOwner: group.isOwner), share: share, invitationURL: invitationURL
         )
+    }
+
+    private func groupShare(for group: GroupSummary) async throws -> (CKRecord, CKShare?) {
+        let database = database(for: group)
+        let root = try await database.record(for: rootID(for: group))
+        guard let shareID = root.share?.recordID else { return (root, nil) }
+        return (root, try await database.record(for: shareID) as? CKShare)
+    }
+
+    func roster(for group: GroupSummary, account: String) -> GroupRoster {
+        let root = rootID(for: group)
+        let verify = { try await self.verifyAccount(account) }
+        return GroupRoster(
+            groupID: group.id, root: root,
+            store: GroupRosterCloudStore(database: database(for: group), root: root, verifyAccount: verify),
+            authorize: { try await self.rosterAccess(for: group, account: account) },
+            verifyAccount: verify
+        )
+    }
+
+    private func rosterAccess(for group: GroupSummary, account: String) async throws -> GroupRosterAccess {
+        try await verifyAccount(account)
+        let root: CKRecord
+        let fetchedShare: CKShare?
+        do {
+            (root, fetchedShare) = try await groupShare(for: group)
+        } catch where GroupsModel.isAccessLoss(error) {
+            try await verifyAccount(account)
+            throw GroupRosterError.accessLost
+        }
+        try await verifyAccount(account)
+        guard root.recordID == rootID(for: group),
+              try summary(for: root, isOwner: group.isOwner).id == group.id else {
+            throw GroupRepositoryError.invalidGroup
+        }
+        guard let shareID = root.share?.recordID else { throw GroupRosterError.accessLost }
+        guard let share = fetchedShare, share.recordID == shareID, shareID.zoneID == root.recordID.zoneID,
+              share.publicPermission == .none else { throw GroupRepositoryError.invalidGroup }
+        guard let participant = share.currentUserParticipant,
+              participant.role == .owner || participant.acceptanceStatus == .accepted else {
+            throw GroupRosterError.accessLost
+        }
+        let isOwner = participant.role == .owner
+        guard isOwner == group.isOwner else { throw GroupRepositoryError.invalidGroup }
+        // These roles govern app actions. A read/write participant has broader CloudKit permissions.
+        let role: GroupRosterAccess.Role = isOwner ? .owner : participant.permission == .readWrite ? .editor : .reader
+        return GroupRosterAccess(role: role, groupID: group.id, account: account)
     }
 
     func loadMemberDisplayNames(in details: GroupDetails, account: String) async -> GroupDetails {

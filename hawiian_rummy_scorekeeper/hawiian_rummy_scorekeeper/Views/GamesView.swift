@@ -3,10 +3,13 @@ import SwiftData
 
 struct GamesView: View {
     @Environment(\.modelContext) private var context
-    @Query(sort: \Game.createdAt, order: .reverse) private var games: [Game]
+    @Query(sort: \Game.createdAt, order: .reverse) private var storedGames: [Game]
+    @Environment(\.personalDeletionTargets) private var deletionTargets
+    @Environment(\.personalDeletionIssue) private var deletionIssue
     @State private var showingDeleteError = false
     @State private var gameToDelete: Game?
 
+    private var games: [Game] { storedGames.filter { !deletionTargets.games.contains($0.id) } }
     private var completedCount: Int { games.filter(\.isComplete).count }
     private var activeCount: Int { games.count - completedCount }
 
@@ -39,6 +42,9 @@ struct GamesView: View {
                         icon: "rectangle.stack.fill"
                     )
                     .listRowBackground(Color.clear)
+                }
+                if let deletionIssue {
+                    Text(deletionIssue).font(.footnote).foregroundStyle(.secondary)
                 }
                 if games.isEmpty {
                     ContentUnavailableView("No games yet", systemImage: "rectangle.stack", description: Text("Start a game from Home when your table is ready."))
@@ -74,11 +80,9 @@ struct GamesView: View {
                 Button("Cancel", role: .cancel) { gameToDelete = nil }
                 Button("Delete Game", role: .destructive) {
                     if let gameToDelete {
-                        context.delete(gameToDelete)
                         do {
-                            try context.save()
+                            try PersonalHistoryDeletion.deleteGame(id: gameToDelete.id, in: context.container)
                         } catch {
-                            context.rollback()
                             showingDeleteError = true
                         }
                     }

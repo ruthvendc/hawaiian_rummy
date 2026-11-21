@@ -34,11 +34,24 @@ struct GroupDetailView: View {
                         confirmation = .removeGroup(isOwner: group.isOwner)
                     }
                 }
+            } else if let saved = model.cachedDetails(for: group) {
+                Section("Members") {
+                    ForEach(saved.members) { member in
+                        GroupMemberLabel(name: member.name, role: member.role)
+                    }
+                    Text("Showing saved members. Connect and refresh for current membership.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("Last updated \(saved.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
-            if isLoading { ProgressView("Refreshing group…") }
-            if let issue = refreshIssue {
-                Text(issue).foregroundStyle(.secondary)
+            Section {
                 Button("Refresh Group") { Task { await reload() } }
+                    .disabled(isLoading)
+                if isLoading { ProgressView("Refreshing group…") }
+                if let issue = refreshIssue {
+                    Text(issue).font(.footnote).foregroundStyle(.secondary)
+                }
             }
             GroupActionStatus(model: model)
         }
@@ -142,6 +155,10 @@ struct GroupDetailView: View {
     private func memberRow(
         _ participant: CKShare.Participant, role: String, fallback: String, in details: GroupDetails
     ) -> some View {
+        if details.memberNamesUnavailable,
+           let saved = model.cachedDetails(for: group)?.members.first(where: { $0.id == participant.participantID }) {
+            return GroupMemberLabel(name: saved.name, role: saved.role)
+        }
         let isYou = details.isCurrentUser(participant)
         if let name = details.displayName(for: participant) {
             return GroupMemberLabel(name: isYou ? "\(name) (You)" : name, role: role)

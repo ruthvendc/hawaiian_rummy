@@ -48,8 +48,17 @@ final class GroupsModel {
     }
 
     func accountDidChange() async {
-        invalidateAccount()
+        prepareForAccountRefresh()
         await refresh()
+    }
+
+    // Availability changes also post CKAccountChanged. Cancel responses from the old
+    // session, then resolve the account before deciding whether its cache must be hidden.
+    func prepareForAccountRefresh() {
+        generation = UUID()
+        isRefreshing = false
+        isWorking = false
+        isStale = !groups.isEmpty
     }
 
     func refresh() async {
@@ -122,6 +131,7 @@ final class GroupsModel {
             guard generation == started else { return }
             snapshot.groups = groups
             let visible = Set(groups.map(\.id))
+            snapshot.groupDetails = snapshot.groupDetails?.filter { visible.contains($0.key) }
             for url in snapshot.pendingLinks {
                 let key = Self.invitationKey(url)
                 if let id = resolved[key], visible.contains(id) {
@@ -155,14 +165,59 @@ final class GroupsModel {
     }
 
     func details(for group: GroupSummary) async throws -> GroupDetails {
+        try await details(
+            for: group,
+            verifyAccount: { try await self.repository.verifyAccount($0) },
+            fetch: { account in
+                let shareDetails = try await self.repository.details(for: group)
+                return await self.repository.loadMemberDisplayNames(in: shareDetails, account: account)
+            }
+        )
+    }
+
+    func details(
+        for group: GroupSummary,
+        verifyAccount: (String) async throws -> Void,
+        fetch: (String) async throws -> GroupDetails
+    ) async throws -> GroupDetails {
         guard let account else { throw GroupRepositoryError.unavailable }
         let started = generation
-        try await repository.verifyAccount(account)
-        let shareDetails = try await repository.details(for: group)
-        let details = await repository.loadMemberDisplayNames(in: shareDetails, account: account)
-        try await repository.verifyAccount(account)
-        guard generation == started else { throw GroupRepositoryError.accountChanged }
-        return details
+        do {
+            try await verifyAccount(account)
+            let details = try await fetch(account)
+            try await verifyAccount(account)
+            guard generation == started else { throw GroupRepositoryError.accountChanged }
+            guard groups.contains(where: { $0.id == group.id }) else { throw GroupRepositoryError.invalidGroup }
+            var saved = snapshot.groupDetails ?? [:]
+            let previous = saved[group.id]
+            let refreshed = details.cachedDetails
+            // Refresh membership even if optional names fail, retaining known names only
+            // for participants who are still in the freshly fetched share.
+            let members = refreshed.members.map { member in
+                guard details.memberNamesUnavailable,
+                      let known = previous?.members.first(where: { $0.id == member.id }) else { return member }
+                return CachedGroupDetails.Member(id: member.id, name: known.name, role: member.role ?? known.role)
+            }
+            saved[group.id] = CachedGroupDetails(members: members, savedAt: refreshed.savedAt)
+            snapshot.groupDetails = saved
+            saveCache()
+            return details
+        } catch {
+            guard generation == started else { throw GroupRepositoryError.accountChanged }
+            if Self.isAccountLoss(error) {
+                invalidateAccount()
+            } else if Self.isAccessLoss(error) {
+                snapshot.groups.removeAll { $0.id == group.id }
+                snapshot.groupDetails?.removeValue(forKey: group.id)
+                saveCache()
+            }
+            throw error
+        }
+    }
+
+    func cachedDetails(for group: GroupSummary) -> CachedGroupDetails? {
+        guard account != nil, groups.contains(where: { $0.id == group.id }) else { return nil }
+        return snapshot.groupDetails?[group.id]
     }
 
     @discardableResult
@@ -206,6 +261,7 @@ final class GroupsModel {
             }
             return {
                 self.snapshot.groups.removeAll { $0.id == group.id }
+                self.snapshot.groupDetails?.removeValue(forKey: group.id)
                 self.saveCache()
             }
         }
@@ -440,8 +496,10 @@ final class GroupsModel {
     }
 
     private static func isAccountLoss(_ error: Error) -> Bool {
-        if let error = error as? GroupRepositoryError, [.accountChanged, .unavailable].contains(error) { return true }
-        return (error as? CKError)?.code == .notAuthenticated
+        // Only an explicit account status or verified identity change confirms account loss.
+        // A CloudKit request can fail authentication while the account is temporarily unavailable.
+        guard let error = error as? GroupRepositoryError else { return false }
+        return [.accountChanged, .unavailable].contains(error)
     }
 
     static func message(for error: Error) -> String {
@@ -450,6 +508,8 @@ final class GroupsModel {
         case .serverRecordChanged: return "This group changed on another device. Refresh and try again."
         case .networkUnavailable, .networkFailure, .serviceUnavailable:
             return "Couldn’t reach iCloud. Check your connection and try again."
+        case .notAuthenticated:
+            return "Couldn’t verify iCloud right now. Connect and refresh to try again."
         default: return "\(error.localizedDescription) (CloudKit \(error.code.rawValue))"
         }
     }

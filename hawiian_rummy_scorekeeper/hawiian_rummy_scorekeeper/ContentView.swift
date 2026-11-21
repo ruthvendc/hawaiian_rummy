@@ -108,5 +108,6 @@ private struct MainTabView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [PlayerProfile.self, Game.self, GameRound.self, RoundParticipant.self, LevelResult.self, ScoreEntry.self], inMemory: true)
+        .modelContainer(for: [PlayerProfile.self, Game.self, GameRound.self, RoundParticipant.self,
+                              LevelResult.self, ScoreEntry.self, PersonalDeletionReceipt.self], inMemory: true)
 }

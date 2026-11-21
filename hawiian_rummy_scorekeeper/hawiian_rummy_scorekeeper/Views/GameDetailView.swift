@@ -3,6 +3,7 @@ import SwiftData
 
 struct GameDetailView: View {
     @Environment(\.modelContext) private var context
+    @Environment(\.personalDeletionTargets) private var deletionTargets
     @EnvironmentObject private var gameNight: GameNightCoordinator
     @State private var scoreLevel = 1
     @State private var showingScoreEntry = false
@@ -17,6 +18,14 @@ struct GameDetailView: View {
     private var currentRound: GameRound? { game.sortedRounds.last }
 
     var body: some View {
+        if game.isDeleted || deletionTargets.games.contains(game.id) {
+            ContentUnavailableView("Game Deleted", systemImage: "trash")
+        } else {
+            gameContent
+        }
+    }
+
+    private var gameContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Toggle(isOn: $gameNight.isEnabled) {

@@ -21,20 +21,27 @@ struct hawiian_rummy_scorekeeperApp: App {
     #endif
 
     init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-InitializeCloudKitSchema") {
+            do {
+                try Self.initializeCloudKitSchema()
+                print("Hawaiian Rummy: CloudKit schema initialized.")
+                exit(EXIT_SUCCESS)
+            } catch {
+                print("Hawaiian Rummy: Could not initialize CloudKit schema: \(error)")
+                exit(EXIT_FAILURE)
+            }
+        }
+        #endif
         let schema = Schema([
             PlayerProfile.self, Game.self, GameRound.self,
-            RoundParticipant.self, LevelResult.self, ScoreEntry.self
+            RoundParticipant.self, LevelResult.self, ScoreEntry.self, PersonalDeletionReceipt.self
         ])
         let configuration = ModelConfiguration(
             schema: schema,
             cloudKitDatabase: .private(Self.cloudKitContainerID)
         )
         do {
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-InitializeCloudKitSchema") {
-                try Self.initializeCloudKitSchema(at: configuration.url)
-            }
-            #endif
             modelContainer = try ModelContainer(for: schema, configurations: configuration)
         } catch {
             modelContainer = nil
@@ -44,9 +51,13 @@ struct hawiian_rummy_scorekeeperApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            appContent.sheet(isPresented: $probe.isPresented) {
-                CloudKitProbeView(probe: probe)
-            }
+            appContent
+                .sheet(isPresented: $probe.isPresented) {
+                    CloudKitProbeView(probe: probe)
+                }
+                .task {
+                    await GroupRosterVerification.runIfRequested(containerIdentifier: Self.cloudKitContainerID)
+                }
             #else
             appContent
             #endif
@@ -56,7 +67,7 @@ struct hawiian_rummy_scorekeeperApp: App {
     private var appContent: some View {
         Group {
             if let modelContainer {
-                ContentView()
+                PersonalDeletionMonitor { ContentView() }
                     .modelContainer(modelContainer)
             } else {
                 ContentUnavailableView(
@@ -69,16 +80,19 @@ struct hawiian_rummy_scorekeeperApp: App {
     }
 
     #if DEBUG
-    private static func initializeCloudKitSchema(at storeURL: URL) throws {
+    private static func initializeCloudKitSchema() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
         try autoreleasepool {
-            let description = NSPersistentStoreDescription(url: storeURL)
+            let description = NSPersistentStoreDescription(url: directory.appending(path: "schema.sqlite"))
             description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
                 containerIdentifier: cloudKitContainerID
             )
             description.shouldAddStoreAsynchronously = false
             guard let model = NSManagedObjectModel.makeManagedObjectModel(for: [
                 PlayerProfile.self, Game.self, GameRound.self,
-                RoundParticipant.self, LevelResult.self, ScoreEntry.self
+                RoundParticipant.self, LevelResult.self, ScoreEntry.self, PersonalDeletionReceipt.self
             ]) else {
                 throw CocoaError(.coderInvalidValue)
             }

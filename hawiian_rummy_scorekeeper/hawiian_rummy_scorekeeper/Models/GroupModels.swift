@@ -11,6 +11,7 @@ struct GroupSummary: Codable, Identifiable, Equatable {
 enum GroupRecordTypes {
     static let group = "GroupV1"
     static let player = "GroupPlayerV1"
+    static let playerName = "GroupPlayerNameV1"
     static let memberDisplayName = "GroupMemberDisplayNameV1"
 }
 
@@ -49,10 +50,19 @@ enum GroupMemberDisplayName {
     }
 }
 
-struct GroupPlayerIdentity: Codable, Identifiable {
+#if DEBUG
+struct GroupPlayerIdentity: Equatable, Identifiable {
     let id: UUID
     let groupID: UUID
-    let creatorUserID: String
-    var displayName: String
-    var retiredAt: Date?
+    let creatorKey: String
+    let displayName: String
+    let retiredAt: Date?
+    let changeTag: String
 }
+
+// Retain the draft and its UUID when a save needs to be retried.
+struct GroupPlayerDraft {
+    let id: UUID
+    let displayName: String
+}
+#endif

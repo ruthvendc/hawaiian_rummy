@@ -14,17 +14,18 @@ struct GroupsView: View {
                     SectionIntroCard(title: "Your Groups", subtitle: "Play with family and friends", icon: "person.3.fill")
                         .listRowBackground(Color.clear)
                     Button("Create Group", systemImage: "plus.circle") { sheet = .create }
-                        .disabled(model.account == nil)
+                        .disabled(model.account == nil || model.isStale)
                     Button("Join Group", systemImage: "link") { sheet = .join }
-                        .disabled(model.account == nil)
+                        .disabled(model.account == nil || model.isStale)
                 }
                 if let issue = model.refreshIssue {
                     Section {
-                        Text(issue).foregroundStyle(.secondary)
+                        Text(model.isStale ? "Couldn’t refresh iCloud. Showing saved groups." : issue)
+                            .font(.footnote).foregroundStyle(.secondary)
                         Button("Refresh Groups") { Task { await model.refresh() } }
                     }
                 }
-                if model.isStale {
+                if model.isStale && model.refreshIssue == nil {
                     Text("Showing saved groups. Pull down to refresh.").foregroundStyle(.secondary)
                 }
                 if let issue = model.cacheIssue { Text(issue).foregroundStyle(.secondary) }

@@ -32,6 +32,18 @@ struct GroupsFoundationChecks {
         try check(reopened.isStale && reopened.groups == [owned, joined], "Retain current account cache after a network failure")
         try check(reopened.snapshot.pendingLinks == [link], "Retain account’s pending invitation across relaunch")
 
+        reopened.prepareForAccountRefresh()
+        await reopened.refresh(accountID: { throw GroupRepositoryError.accountTemporarilyUnavailable }, discover: { [] })
+        try check(reopened.groups == [owned, joined] && reopened.account == "A" && reopened.isStale &&
+                  reopened.snapshot.pendingLinks == [link],
+                  "An account availability notification followed by offline failure retains groups and invitations")
+        await reopened.refresh(accountID: { throw CKError(.notAuthenticated) }, discover: { [] })
+        try check(reopened.groups == [owned, joined] && reopened.account == "A" && reopened.isStale,
+                  "A request authentication failure does not confirm sign-out or discard cached groups")
+        let offlineCache = try cache.load(account: "A")
+        try check(offlineCache.groups == [owned, joined] && offlineCache.pendingLinks == [link],
+                  "Failed account refreshes do not replace the persisted cache with an empty list")
+
         await reopened.refresh(accountID: { "B" }, discover: { [other] })
         try check(reopened.groups == [other] && reopened.snapshot.pendingLinks.isEmpty, "Switch accounts without leaking cached groups or links")
         let original = try cache.load(account: "A")
@@ -148,6 +160,68 @@ struct GroupsFoundationChecks {
                   namesRelaunched.snapshot.memberNameDrafts?[joined.id] == "", "Keep offline drafts across launch without changing groups")
         await namesRelaunched.refresh(accountID: { "B" }, discover: { [other] })
         try check(namesRelaunched.snapshot.memberNameDrafts == nil, "Do not show drafts across iCloud accounts")
+
+        let root = CKRecord(recordType: GroupRecordTypes.group, recordID: CKRecord.ID(recordName: "group"))
+        let share = CKShare(rootRecord: root)
+        var liveDetails = GroupDetails(group: owned, share: share, invitationURL: nil)
+        liveDetails.memberDisplayNames[share.owner.participantID] = "David"
+        let detailsModel = GroupsModel(containerIdentifier: "unused-in-local-checks", cacheURL: cacheURL)
+        await detailsModel.refresh(accountID: { "details-account" }, discover: { [owned, joined] })
+        _ = detailsModel.keepMemberNameDraft("Unsent draft", in: owned, account: "details-account")
+        _ = try await detailsModel.details(for: owned, verifyAccount: { _ in }, fetch: { _ in liveDetails })
+        let savedDetails = try require(detailsModel.cachedDetails(for: owned), "Store successfully fetched membership details")
+        try check(savedDetails.members.first?.name == "David (You)",
+                  "Cache resolved member names and roles after a successful online details read")
+        do {
+            _ = try await detailsModel.details(for: owned, verifyAccount: { _ in throw CKError(.networkUnavailable) },
+                                               fetch: { _ in throw Failure(message: "Should not fetch while offline") })
+            throw Failure(message: "Expected offline details failure")
+        } catch let error as CKError {
+            try check(error.code == .networkUnavailable && detailsModel.cachedDetails(for: owned) == savedDetails &&
+                      detailsModel.groups == [owned, joined],
+                      "Offline details refresh retains group membership and names for display")
+        }
+        let detailsRelaunched = GroupsModel(containerIdentifier: "unused-in-local-checks", cacheURL: cacheURL)
+        await detailsRelaunched.refresh(accountID: { "details-account" }, discover: { throw CKError(.networkFailure) })
+        try check(detailsRelaunched.cachedDetails(for: owned) == savedDetails &&
+                  detailsRelaunched.snapshot.memberNameDrafts?[owned.id] == "Unsent draft",
+                  "Membership cache and unsent name draft survive recreating the app model")
+        var updatedDetails = liveDetails
+        updatedDetails.memberDisplayNames[share.owner.participantID] = "David Updated"
+        let recovered = try await detailsRelaunched.details(
+            for: owned, verifyAccount: { _ in }, fetch: { _ in updatedDetails }
+        )
+        try check(recovered.displayName(for: share.owner) == "David Updated" && detailsRelaunched.isStale &&
+                  detailsRelaunched.cachedDetails(for: owned)?.members.first?.name == "David Updated (You)",
+                  "An individual group recovers fresh data while the overall Groups list is still stale")
+        try check(detailsRelaunched.snapshot.memberNameDrafts?[owned.id] == "Unsent draft",
+                  "Refreshing an individual group preserves the member’s unsent display name draft")
+        _ = try await detailsRelaunched.details(for: owned, verifyAccount: { _ in }, fetch: { _ in liveDetails })
+        var incompleteNames = liveDetails
+        incompleteNames.memberNamesUnavailable = true
+        incompleteNames.memberDisplayNames = [:]
+        _ = try await detailsRelaunched.details(for: owned, verifyAccount: { _ in }, fetch: { _ in incompleteNames })
+        try check(detailsRelaunched.cachedDetails(for: owned)?.members == savedDetails.members,
+                  "An optional display name fetch failure does not overwrite saved names")
+        await detailsRelaunched.refresh(accountID: { "details-account" }, discover: { [joined] })
+        try check(detailsRelaunched.cachedDetails(for: owned) == nil &&
+                  detailsRelaunched.snapshot.groupDetails?[owned.id] == nil && !detailsRelaunched.isStale,
+                  "Successful online discovery removes deleted or revoked groups and cached membership")
+        await detailsRelaunched.refresh(accountID: { "details-account" }, discover: { [owned, joined] })
+        _ = try await detailsRelaunched.details(for: owned, verifyAccount: { _ in }, fetch: { _ in liveDetails })
+        do {
+            _ = try await detailsRelaunched.details(for: owned, verifyAccount: { _ in },
+                                                   fetch: { _ in throw CKError(.permissionFailure) })
+            throw Failure(message: "Expected confirmed access loss")
+        } catch let error as CKError {
+            try check(error.code == .permissionFailure && !detailsRelaunched.groups.contains(owned) &&
+                      detailsRelaunched.cachedDetails(for: owned) == nil,
+                      "A server permission denial removes cached details instead of showing stale access")
+        }
+        await detailsRelaunched.refresh(accountID: { "another-account" }, discover: { [other] })
+        try check(detailsRelaunched.cachedDetails(for: owned) == nil && detailsRelaunched.snapshot.groupDetails == nil,
+                  "Cached membership never crosses a verified account switch")
+        try check(legacySnapshot.groupDetails == nil, "Existing cache snapshots decode without membership data")
         print("Groups Foundation checks passed.")
     }
 
