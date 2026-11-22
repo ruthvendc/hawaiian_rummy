@@ -17,10 +17,12 @@ enum GroupRosterChange {
 final class GroupsModel {
     @ObservationIgnored private lazy var repository = GroupRepository(containerIdentifier: containerIdentifier)
     @ObservationIgnored private lazy var cache = try? GroupCache(url: cacheURL)
+    @ObservationIgnored private var scoringJournal: GroupGameJournal?
     private let containerIdentifier: String
     private let cacheURL: URL?
 
     private(set) var account: String?
+    private(set) var scoringAccount: String?
     private(set) var snapshot = GroupCacheSnapshot()
     private(set) var isStale = false
     private(set) var isRefreshing = false
@@ -65,6 +67,7 @@ final class GroupsModel {
     // session, then resolve the account before deciding whether its cache must be hidden.
     func prepareForAccountRefresh() {
         generation = UUID()
+        scoringAccount = nil
         isRefreshing = false
         isWorking = false
         isStale = !groups.isEmpty
@@ -82,14 +85,16 @@ final class GroupsModel {
         guard !isRefreshing, !isWorking else { return }
         repeat {
             nativeRefreshQueued = false
+            let diagnostic = pendingOnly ? nil : GroupAccountLaunchDiagnostic.shared.begin()
             await refresh(
-                accountID: { try await self.repository.accountID() },
+                accountID: { try await self.repository.accountID(diagnostic: diagnostic?.takeInitialLookup()) },
                 discover: { try await self.repository.discover() },
                 resolveInvitation: { url, account in
                     let metadata = try await self.repository.invitationMetadata(for: url)
                     return try await self.repository.accept(metadata, account: account)
                 },
-                pendingOnly: pendingOnly
+                pendingOnly: pendingOnly,
+                diagnostic: diagnostic
             )
         } while nativeRefreshQueued && !Task.isCancelled && !isWorking && !isRefreshing
     }
@@ -98,14 +103,18 @@ final class GroupsModel {
         accountID: () async throws -> String,
         discover: () async throws -> [GroupSummary],
         resolveInvitation: ((URL, String) async throws -> UUID)? = nil,
-        pendingOnly: Bool = false
+        pendingOnly: Bool = false,
+        diagnostic: GroupAccountLaunchDiagnostic? = nil
     ) async {
         guard !isRefreshing, !isWorking else { return }
+        defer { diagnostic?.finish() }
         var started = generation
+        var resolvingAccount = true
         isRefreshing = true
         do {
             let verified = try await accountID()
             guard generation == started else { return }
+            resolvingAccount = false
             if account != verified {
                 if account != nil {
                     invalidateAccount()
@@ -116,13 +125,22 @@ final class GroupsModel {
                 snapshot = GroupCacheSnapshot()
                 isStale = false
                 do {
-                    if let cache { snapshot = try cache.load(account: verified) }
+                    if let cache {
+                        snapshot = try cache.load(account: verified)
+                        diagnostic?.reportCache(.read(groupsPresent: !snapshot.groups.isEmpty))
+                    } else {
+                        diagnostic?.reportCache(.unavailable)
+                    }
                     snapshot.pendingLinks = Self.uniqueInvitationLinks(snapshot.pendingLinks)
                     cacheIssue = cache == nil ? "Groups could not open its local cache." : nil
                 } catch {
+                    diagnostic?.reportCache(.failed)
                     cacheIssue = "Groups could not read its local cache."
                 }
+            } else {
+                diagnostic?.reportCache(.reusedInMemory)
             }
+            scoringAccount = verified
             refreshIssue = nil
             let resolved: [String: UUID]
             if let resolveInvitation {
@@ -136,8 +154,10 @@ final class GroupsModel {
                 return
             }
             let groups = try await discover()
+            resolvingAccount = true
             guard try await accountID() == verified else { throw GroupRepositoryError.accountChanged }
             guard generation == started else { return }
+            resolvingAccount = false
             let visible = Set(groups.map(\.id))
             let previous = Dictionary(snapshot.groups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let sameScope = Set(groups.filter { group in
@@ -158,8 +178,10 @@ final class GroupsModel {
             }
             isStale = false
             saveCache()
+            diagnostic?.recordOnlineBaseline(account: verified)
         } catch {
             guard generation == started else { return }
+            if resolvingAccount { scoringAccount = nil }
             if Self.isAccountLoss(error) {
                 invalidateAccount()
             } else {
@@ -341,6 +363,39 @@ final class GroupsModel {
 
     func containsGroup(_ group: GroupSummary) -> Bool {
         groups.contains { $0.id == group.id && $0.zoneOwner == group.zoneOwner && $0.isOwner == group.isOwner }
+    }
+
+    func gameJournal(for route: GroupGameRoute, account expectedAccount: String?) throws -> GroupGameJournal.Game {
+        guard let scoringAccount, scoringAccount == expectedAccount, containsGroup(route.group) else {
+            throw GroupRepositoryError.accountTemporarilyUnavailable
+        }
+        let store = try openScoringJournal()
+        return GroupGameJournal.Game(store: store, scope: .init(namespace: journalNamespace(scoringAccount), route: route))
+    }
+
+    func resumableGames() throws -> [GroupGameJournal.ResumeItem] {
+        guard let scoringAccount else { return [] }
+        let entries = try openScoringJournal().entries(in: journalNamespace(scoringAccount))
+        return entries.filter(\.canResume).sorted {
+            ($0.operations.last?.createdAt ?? $0.confirmed.header.updatedAt ?? .distantPast) >
+                ($1.operations.last?.createdAt ?? $1.confirmed.header.updatedAt ?? .distantPast)
+        }.compactMap { entry in
+            guard let group = groups.first(where: entry.scope.matches), let game = try? entry.scorecard() else { return nil }
+            return GroupGameJournal.ResumeItem(route: GroupGameRoute(group: group, gameID: entry.scope.gameID),
+                                               header: game.header, syncStatus: entry.syncStatus)
+        }
+    }
+
+    private func openScoringJournal() throws -> GroupGameJournal {
+        if let scoringJournal { return scoringJournal }
+        let opened = try GroupGameJournal()
+        scoringJournal = opened
+        return opened
+    }
+
+    private func journalNamespace(_ account: String) -> GroupGameJournal.Namespace {
+        // Groups currently ships in Debug with the Development CloudKit entitlement.
+        .init(account: account, container: containerIdentifier, environment: "Development")
     }
 
     func withSharedGroup<Result>(
@@ -598,6 +653,7 @@ final class GroupsModel {
     func invalidateAccount() {
         generation = UUID()
         account = nil
+        scoringAccount = nil
         snapshot = GroupCacheSnapshot()
         rosterRequests.removeAll()
         rosterWrites.removeAll()

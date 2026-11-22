@@ -34,7 +34,8 @@ struct GroupGameDetailView: View {
                     gameContent(detail)
                 }
             } else {
-                ContentUnavailableView("Group Unavailable", systemImage: "person.3")
+                ContentUnavailableView("Group Unavailable", systemImage: "person.3",
+                                       description: Text("Verify your iCloud account and group access to see saved scores."))
             }
         }
         .background(Color.softPurpleBackground)
@@ -56,10 +57,10 @@ struct GroupGameDetailView: View {
         }
         .onChange(of: hasPath == true && scenePhase == .active, initial: true) { _, online in
             scoring.online = online
-            if online { Task { await scoring.refresh() } }
+            if scenePhase == .active { Task { await scoring.refresh() } }
         }
-        .onChange(of: scoring.canView) { _, canView in
-            if !canView { scoring.discardInaccessibleGame() }
+        .task(id: scoring.canView) {
+            if scoring.canView { await scoring.refresh() } else { scoring.discardInaccessibleGame() }
         }
         .onChange(of: scoring.draft != nil) { _, hasDraft in showingScoreEntry = hasDraft }
         .sheet(isPresented: $showingScoreEntry, onDismiss: {
@@ -107,7 +108,7 @@ struct GroupGameDetailView: View {
     }
 
     private enum Confirmation {
-        case end(GroupGameVersion)
+        case end(GroupGameScoring.EditVersion)
         case cancel(GroupGameVersion)
         case delete(GroupGameVersion)
 
@@ -149,7 +150,7 @@ struct GroupGameDetailView: View {
             }
         }
         if game.header.status == .inProgress, let round = game.rounds.last {
-            currentRound(round, header: game.header)
+            currentRound(round)
         }
         Section {
             GroupGameStandings(rows: game.standings())
@@ -182,7 +183,7 @@ struct GroupGameDetailView: View {
         }
     }
 
-    private func currentRound(_ round: GroupGameRound, header: GroupGameHeader) -> some View {
+    private func currentRound(_ round: GroupGameRound) -> some View {
         let next = LevelDefinition.all.dropFirst(round.hands.count).first
         return Section("Current Round") {
             if let next {
@@ -195,20 +196,20 @@ struct GroupGameDetailView: View {
                 }
             } else {
                 Text("Round \(round.id.number) complete").font(.headline)
-                if scoring.canStartChange {
+                if scoring.canStartChange, let version = scoring.editVersion {
                     Button("Play Another Round", systemImage: "arrow.clockwise") {
-                        Task { await scoring.advance(from: header.version) }
+                        Task { await scoring.advance(from: version) }
                     }
                 }
             }
-            if scoring.canStartChange {
+            if scoring.canStartChange, let version = scoring.editVersion {
                 if let previous = round.hands.last {
                     Button("Edit Previous Hand") {
                         scoring.beginScores(round: round.id.number, hand: previous.number)
                     }
                 }
                 Button("End Game", role: .destructive) {
-                    confirmation = .end(header.version)
+                    confirmation = .end(version)
                     confirming = true
                 }
             }
@@ -314,16 +315,15 @@ private struct GroupGameConnectionStatus: View {
             ProgressView("Saving change…")
         } else if scoring.isRefreshing || checkingConnection {
             ProgressView("Loading scores…")
-        } else if !scoring.online {
-            Text(scoring.detail == nil ? "Connect to iCloud to load scores." : "Offline. Showing the last loaded scores.")
-                .foregroundStyle(.secondary)
         } else if let issue = scoring.loadIssue {
             Text(issue).foregroundStyle(.secondary)
+        } else if !scoring.online {
+            Text(scoring.detail == nil ? "Connect to iCloud to load scores." : "Offline")
+                .foregroundStyle(.secondary)
         }
+        if let status = scoring.syncStatus { Text(status).foregroundStyle(.secondary) }
         if !scoring.isBusy && scoring.awaitingReadback {
             Text("Change saved. Refresh to see the latest scores.").foregroundStyle(.secondary)
-        } else if scoring.online && !scoring.isBusy && !scoring.hasLiveSnapshot && scoring.detail != nil {
-            Text("Showing the last loaded scores.").foregroundStyle(.secondary)
         }
         if let issue = scoring.changeIssue { Text(issue).foregroundStyle(.secondary) }
         if scoring.pending != nil && !scoring.isSubmitting {
@@ -334,7 +334,6 @@ private struct GroupGameConnectionStatus: View {
 
 private struct GroupGameScoreEntryView: View {
     let scoring: GroupGameScoring
-    @Environment(\.dismiss) private var dismiss
     @State private var confirmingDiscard = false
 
     var body: some View {
@@ -349,7 +348,7 @@ private struct GroupGameScoreEntryView: View {
                     if scoring.online && !scoring.hasLiveSnapshot && !scoring.isBusy {
                         Button("Refresh Scores") { Task { await scoring.refresh() } }
                     }
-                    if scoring.draftNeedsReview && scoring.pending == nil {
+                    if scoring.draftNeedsReview {
                         reviewSection(draft)
                     }
                     if scoring.detail?.canScore == false {
@@ -363,17 +362,15 @@ private struct GroupGameScoreEntryView: View {
                             ))
                         }
                     }
-                    .disabled(scoring.pending != nil || scoring.detail?.canScore != true)
+                    .disabled(scoring.isSubmitting || scoring.detail?.canScore != true)
                 }
                 .scrollContentBackground(.hidden)
                 .background(Color.softPurpleBackground)
                 .navigationTitle(draft.isCorrection ? "Edit Scores" : "Enter Scores")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button(scoring.pending == nil ? "Cancel" : "Close") {
-                            if scoring.pending != nil {
-                                dismiss()
-                            } else if draft.values == draft.originalValues {
+                        Button("Cancel") {
+                            if draft.values == draft.originalValues {
                                 scoring.closeDraft()
                             } else {
                                 confirmingDiscard = true
@@ -388,7 +385,7 @@ private struct GroupGameScoreEntryView: View {
                 .confirmationDialog("Discard your score entries?", isPresented: $confirmingDiscard, titleVisibility: .visible) {
                     Button("Discard", role: .destructive) { scoring.closeDraft() }
                 }
-                .interactiveDismissDisabled(draft.values != draft.originalValues || scoring.pending != nil)
+                .interactiveDismissDisabled(draft.values != draft.originalValues)
             }
         }
     }

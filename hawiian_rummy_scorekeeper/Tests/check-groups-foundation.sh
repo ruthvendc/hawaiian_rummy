@@ -8,9 +8,14 @@ trap 'rm -rf "$output_dir"' EXIT
 
 xcrun --sdk macosx swiftc -D DEBUG -default-isolation MainActor \
     -target "$(uname -m)-apple-macosx26.0" \
+    "$source_dir/Models/GameModels.swift" \
+    "$source_dir/Models/GroupGame.swift" \
     "$source_dir/Models/GroupModels.swift" \
     "$source_dir/Models/PlayerName.swift" \
     "$source_dir/Services/GroupCache.swift" \
+    "$source_dir/Services/GameRules.swift" \
+    "$source_dir/Services/GroupGameJournal.swift" \
+    "$source_dir/Services/GroupGameStore.swift" \
     "$source_dir/Services/GroupRepository.swift" \
     "$source_dir/Services/GroupRoster.swift" \
     "$source_dir/Services/GroupCloudStore.swift" \

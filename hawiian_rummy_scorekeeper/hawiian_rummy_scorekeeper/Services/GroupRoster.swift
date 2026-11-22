@@ -26,8 +26,8 @@ enum GroupRosterError: LocalizedError, Equatable {
     }
 }
 
-struct GroupRosterAccess: Equatable {
-    enum Role { case owner, editor, reader }
+struct GroupRosterAccess: Codable, Equatable {
+    enum Role: String, Codable { case owner, editor, reader }
 
     let role: Role
     let creatorKey: String

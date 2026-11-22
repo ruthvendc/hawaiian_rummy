@@ -18,6 +18,10 @@ struct GroupsView: View {
                     Button("Join Group", systemImage: "link") { sheet = .join }
                         .disabled(model.account == nil || model.isStale)
                 }
+                NavigationLink("Resume Group Game") { ResumableGroupGamesView(model: model) }
+                NavigationLink("Account Diagnostic") {
+                    GroupAccountDiagnosticView()
+                }
                 if let issue = model.refreshIssue {
                     Section {
                         Text(model.isStale ? "Couldn’t refresh iCloud. Showing saved groups." : issue)
@@ -77,6 +81,99 @@ struct GroupsView: View {
             case .create: CreateGroupView(model: model)
             case .join: JoinGroupView(model: model)
             }
+        }
+    }
+}
+
+private struct ResumableGroupGamesView: View {
+    let model: GroupsModel
+    @State private var items: [GroupGameJournal.ResumeItem] = []
+    @State private var loadedAccount: String?
+    @State private var loadFailed = false
+
+    var body: some View {
+        let visible = items.filter { model.containsGroup($0.route.group) }
+        List {
+            if model.scoringAccount == nil {
+                Text("Verify your iCloud account to resume saved group scoring.")
+            } else if loadedAccount != model.scoringAccount {
+                ProgressView("Loading saved games…")
+            } else if loadFailed {
+                Text("Couldn’t open saved scoring on this iPhone.")
+            } else if visible.isEmpty {
+                Text("No group games saved for offline scoring.")
+            } else {
+                ForEach(visible) { item in
+                    NavigationLink {
+                        GroupGameDetailView(route: item.route, model: model)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(item.route.group.name).font(.headline)
+                            GroupGameSummary(header: item.header, scorekeeper: "You")
+                            Text(item.syncStatus).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Resume Group Game")
+        .task(id: model.scoringAccount) { load() }
+        .refreshable { load() }
+    }
+
+    private func load() {
+        do {
+            items = try model.resumableGames()
+            loadFailed = false
+        } catch {
+            items = []
+            loadFailed = true
+        }
+        loadedAccount = model.scoringAccount
+    }
+}
+
+private struct GroupAccountDiagnosticView: View {
+    @AppStorage(GroupAccountLaunchDiagnostic.nextLaunchModeKey)
+    private var nextLaunchMode: GroupAccountLaunchDiagnostic.Mode = .off
+    private let diagnostic = GroupAccountLaunchDiagnostic.shared
+
+    var body: some View {
+        List {
+            Section("This Launch") {
+                LabeledContent("Diagnostic Mode", value: diagnostic.mode.title)
+                lookup(.accountStatus, title: "CloudKit Account Status")
+                lookup(.userRecordID, title: "User Record ID Lookup")
+                LabeledContent("Online Baseline", value: diagnostic.baselineStatus)
+                LabeledContent("Account Comparison", value: diagnostic.comparison)
+                LabeledContent("Groups Cache", value: diagnostic.cacheResult?.title ?? "Not checked yet")
+            }
+            Section {
+                Picker("Mode", selection: $nextLaunchMode) {
+                    ForEach(GroupAccountLaunchDiagnostic.Mode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+            } header: {
+                Text("Next Launch")
+            } footer: {
+                Text(diagnostic.usesLaunchEnvironment
+                     ? "Xcode set the mode for this launch. To use the selected mode, fully close the app and reopen it from the Home Screen."
+                     : "Fully close the app and reopen it to use the selected mode.")
+            }
+        }
+        .navigationTitle("Account Diagnostic")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder private func lookup(_ stage: GroupAccountLaunchDiagnostic.Lookup, title: String) -> some View {
+        let result = diagnostic.lookups[stage]
+        LabeledContent(title, value: result?.summary ?? "Not started")
+        if let elapsed = result?.elapsedMs {
+            LabeledContent("\(title) Duration", value: "\(elapsed) ms")
+        }
+        if let error = result?.error {
+            LabeledContent("\(title) Error", value: error)
         }
     }
 }

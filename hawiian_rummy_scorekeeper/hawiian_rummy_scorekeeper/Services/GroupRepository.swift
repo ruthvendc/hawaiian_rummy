@@ -2,6 +2,7 @@
 import CloudKit
 import CryptoKit
 import Foundation
+import Observation
 import OSLog
 
 struct GroupDetails {
@@ -100,9 +101,23 @@ struct GroupRepository {
         container = CKContainer(identifier: containerIdentifier)
     }
 
-    func accountID() async throws -> String {
-        switch try await container.accountStatus() {
-        case .available: return try await container.userRecordID().recordName
+    func accountID(diagnostic: GroupAccountLaunchDiagnostic? = nil) async throws -> String {
+        let status = try await GroupAccountLaunchDiagnostic.measure(
+            .accountStatus, diagnostic: diagnostic, describe: GroupAccountLaunchDiagnostic.statusName
+        ) {
+            try await container.accountStatus()
+        }
+        if status != .available { diagnostic?.skipUserRecordID() }
+        switch status {
+        case .available:
+            return try await GroupAccountLaunchDiagnostic.measure(
+                .userRecordID, diagnostic: diagnostic, describe: { account in
+                    diagnostic?.compareAccount(account)
+                    return "Succeeded"
+                }
+            ) {
+                try await container.userRecordID().recordName
+            }
         case .noAccount, .restricted: throw GroupRepositoryError.unavailable
         default: throw GroupRepositoryError.accountTemporarilyUnavailable
         }
@@ -541,6 +556,177 @@ struct GroupRepository {
     private static func groupID(in zone: CKRecordZone.ID) -> UUID? {
         guard zone.zoneName.hasPrefix(zonePrefix) else { return nil }
         return UUID(uuidString: String(zone.zoneName.dropFirst(zonePrefix.count)))
+    }
+}
+
+@MainActor
+@Observable
+final class GroupAccountLaunchDiagnostic {
+    enum Mode: String, CaseIterable {
+        case off, baseline, offline
+
+        var title: String {
+            switch self {
+            case .off: "Off"
+            case .baseline: "Online Baseline"
+            case .offline: "Offline Lookup"
+            }
+        }
+    }
+
+    enum Lookup: String {
+        case accountStatus, userRecordID
+    }
+
+    struct LookupResult {
+        let summary: String
+        var elapsedMs: Int64?
+        var error: String?
+    }
+
+    enum CacheResult {
+        case read(groupsPresent: Bool), unavailable, failed, reusedInMemory, notAttempted
+
+        var title: String {
+            switch self {
+            case .read(let present): present ? "Read using resolved account · groups found" : "Read using resolved account · no groups"
+            case .unavailable: "Couldn’t open the disk cache for the resolved account"
+            case .failed: "Couldn’t read the disk cache for the resolved account"
+            case .reusedInMemory: "Reused in-memory snapshot"
+            case .notAttempted: "Not attempted"
+            }
+        }
+
+        var logDetails: String {
+            switch self {
+            case .read(let present): "result=read source=resolved-account groupsPresent=\(present)"
+            case .unavailable: "result=unavailable source=resolved-account"
+            case .failed: "result=failed source=resolved-account"
+            case .reusedInMemory: "result=reused-in-memory"
+            case .notAttempted: "result=not-attempted"
+            }
+        }
+    }
+
+    static let shared = GroupAccountLaunchDiagnostic()
+    static let nextLaunchModeKey = "debug.groupAccountDiagnostic.nextLaunchMode"
+    private static let baselineKey = "debug.groupAccountDiagnostic.baselineDigest"
+    let mode: Mode
+    let usesLaunchEnvironment: Bool
+    private(set) var lookups: [Lookup: LookupResult] = [:]
+    private(set) var comparison = "unknown"
+    private(set) var cacheResult: CacheResult?
+    private let baseline: String?
+    private var started = false
+    private var lookupStarted = false
+    private var baselineRecorded = false
+    private var finished = false
+
+    private init() {
+        let launchMode = ProcessInfo.processInfo.environment["RUMMY_GROUP_ACCOUNT_DIAGNOSTIC"].flatMap(Mode.init(rawValue:))
+        let savedMode = UserDefaults.standard.string(forKey: Self.nextLaunchModeKey).flatMap(Mode.init(rawValue:))
+        mode = launchMode ?? savedMode ?? .off
+        usesLaunchEnvironment = launchMode != nil
+        baseline = mode == .baseline ? nil : UserDefaults.standard.string(forKey: Self.baselineKey)
+    }
+
+    var baselineStatus: String {
+        if baselineRecorded { return "Recorded" }
+        if mode == .baseline { return finished ? "Not recorded" : "Waiting for online verification" }
+        return baseline == nil ? "Missing" : "Present"
+    }
+
+    func begin() -> GroupAccountLaunchDiagnostic? {
+        guard !started else { return nil }
+        started = true
+        guard mode != .off else { return nil }
+        if mode == .baseline { UserDefaults.standard.removeObject(forKey: Self.baselineKey) }
+        log("first Groups refresh mode=\(mode.rawValue) baseline=\(baseline == nil ? "missing" : "present")")
+        return self
+    }
+
+    func takeInitialLookup() -> GroupAccountLaunchDiagnostic? {
+        guard !lookupStarted else { return nil }
+        lookupStarted = true
+        return self
+    }
+
+    static func measure<Value>(
+        _ stage: Lookup, diagnostic: GroupAccountLaunchDiagnostic?, describe: (Value) -> String,
+        lookup: () async throws -> Value
+    ) async rethrows -> Value {
+        guard let diagnostic else { return try await lookup() }
+        diagnostic.lookups[stage] = LookupResult(summary: "In progress")
+        diagnostic.log("\(stage.rawValue) result=started")
+        let start = ContinuousClock.now
+        do {
+            let value = try await lookup()
+            let elapsed = elapsedMilliseconds(since: start)
+            let summary = describe(value)
+            diagnostic.lookups[stage] = LookupResult(summary: summary, elapsedMs: elapsed)
+            let result = stage == .accountStatus ? "status=\(summary)" : "comparison=\(diagnostic.comparison)"
+            diagnostic.log("\(stage.rawValue) result=success elapsedMs=\(elapsed) \(result)")
+            return value
+        } catch {
+            let cause = (error as? CKError).map { "CKError(\($0.code.rawValue))" } ?? "other"
+            let elapsed = elapsedMilliseconds(since: start)
+            diagnostic.lookups[stage] = LookupResult(summary: "Failed", elapsedMs: elapsed, error: cause)
+            diagnostic.log("\(stage.rawValue) result=failed elapsedMs=\(elapsed) error=\(cause) comparison=unknown")
+            if stage == .accountStatus { diagnostic.skipUserRecordID() }
+            throw error
+        }
+    }
+
+    private static func elapsedMilliseconds(since start: ContinuousClock.Instant) -> Int64 {
+        let elapsed = start.duration(to: .now).components
+        return elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
+    }
+
+    static func statusName(_ status: CKAccountStatus) -> String {
+        switch status {
+        case .available: ".available"
+        case .noAccount: ".noAccount"
+        case .restricted: ".restricted"
+        case .couldNotDetermine: ".couldNotDetermine"
+        case .temporarilyUnavailable: ".temporarilyUnavailable"
+        @unknown default: "unrecognized"
+        }
+    }
+
+    func skipUserRecordID() {
+        lookups[.userRecordID] = LookupResult(summary: "Skipped")
+        log("userRecordID result=skipped comparison=unknown")
+    }
+
+    func compareAccount(_ account: String) {
+        guard let baseline else { return }
+        comparison = Self.digest(account) == baseline ? "match" : "mismatch"
+    }
+
+    func recordOnlineBaseline(account: String) {
+        guard mode == .baseline else { return }
+        UserDefaults.standard.set(Self.digest(account), forKey: Self.baselineKey)
+        baselineRecorded = true
+        log("baseline=recorded after CloudKit group discovery and account recheck")
+    }
+
+    private static func digest(_ account: String) -> String {
+        GroupRoster.digest("debug-group-account-baseline-v1:\(account)")
+    }
+
+    func reportCache(_ result: CacheResult) {
+        cacheResult = result
+        log("cache \(result.logDetails)")
+    }
+
+    func finish() {
+        finished = true
+        if cacheResult == nil { reportCache(.notAttempted) }
+        if mode == .baseline && !baselineRecorded { log("baseline=not-recorded") }
+    }
+
+    private func log(_ message: String) {
+        print("[Group account diagnostic] \(message)")
     }
 }
 #endif

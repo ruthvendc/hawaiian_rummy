@@ -7,6 +7,7 @@ struct GroupGameChecks {
         try await identityAndLifecycle()
         try await scoringSession()
         try await scoringProgression()
+        try await offlineJournal()
         try await ownerReassignment()
         try await ownerCancellation()
         try await ownerDeletion()
@@ -94,6 +95,9 @@ struct GroupGameChecks {
         var failLoad = false
         var revoked = false
         let access = try await member.authorize()
+        let directory = try temporaryJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let local = try journalGame(in: directory, fixture: fixture, gameID: create.gameID)
         let scoring = GroupGameScoring(hasGroup: { true }, load: {
             if failLoad { throw CKError(.networkUnavailable) }
             let game = try await member.load(create.gameID)
@@ -107,7 +111,7 @@ struct GroupGameChecks {
             let receipt = try await authorized.perform(operation)
             if loseResponse { throw CKError(.networkFailure) }
             return receipt
-        })
+        }, journal: { local })
         scoring.online = true
         await scoring.refresh()
         guard let original = scoring.detail?.game else { throw Failure("No initial scoring snapshot") }
@@ -123,35 +127,37 @@ struct GroupGameChecks {
         try check(!scoring.canSaveDraft, "Every participant needs a non-negative score")
         scoring.updateScore(for: second, value: "10")
         scoring.online = false
-        await scoring.saveDraft()
-        try check(submitted.isEmpty && scoring.draft?.values[first] == "9", "Offline score entry stays in the form")
+        try check(submitted.isEmpty && scoring.draft?.values[first] == "9", "The editor retains entered values across a connection change")
         scoring.online = true
         await scoring.refresh()
 
         let competingHand = scored(1, points: 3, original)
         _ = try await member.perform(change(original, .saveHand(round: 1, hand: competingHand)))
+        await scoring.refresh()
         await scoring.saveDraft()
         try check(scoring.pending == nil && scoring.draftNeedsReview && !scoring.canSaveDraft &&
                   scoring.draft?.values[first] == "9" && scoring.savedDraftHand == competingHand,
-                  "Stale-write rejection loads the newer score and retains the entered score for review")
+                  "A refreshed snapshot leaves the stale editor open with the entered score and latest saved score")
         await scoring.saveDraft()
-        try check(submitted.count == 1, "A newer version requires explicit review")
+        try check(submitted.isEmpty, "A newer version requires explicit review")
         scoring.reviewDraft()
         loseResponse = true
         await scoring.saveDraft()
         guard let pending = scoring.pending else { throw Failure("The unconfirmed operation was lost") }
-        try check(scoring.canRetry && !scoring.canSaveDraft && pending.id != submitted[0].id &&
-                  pending.expectedVersion != submitted[0].expectedVersion,
-                  "A deliberate resubmission uses a fresh ID and the reviewed version")
-        scoring.updateScore(for: first, value: "99")
-        try check(scoring.draft?.values[first] == "9", "An ambiguous write retains its original score entries")
+        try check(scoring.canRetry && scoring.draft == nil && pending.id == submitted[0].id &&
+                  pending.expectedVersion?.revision == original.header.version.revision + 1 &&
+                  local.load()?.operations.first?.request.id == pending.id,
+                  "A reviewed score is persisted with the exact request before submission")
+        let reopenedLocal = try journalGame(in: directory, fixture: fixture, gameID: create.gameID)
+        try check(try reopenedLocal.load()?.scorecard().standings().map(\.total) == [9, 10],
+                  "An ambiguous write retains the same projected scores on disk")
         loseResponse = false
         failLoad = true
         await scoring.retry()
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         try check(try encoder.encode(submitted.last) == encoder.encode(pending) && fixture.transport.commits == 3 &&
-                  scoring.pending == nil && scoring.draft == nil && scoring.awaitingReadback && !scoring.canScore,
+                  scoring.pending == nil && scoring.draft == nil && scoring.awaitingReadback,
                   "Retry replays the exact operation and a failed readback is distinguished from a failed write")
         failLoad = false
         await scoring.refresh()
@@ -165,6 +171,8 @@ struct GroupGameChecks {
         await scoring.saveDraft()
         try check(!scoring.canView && scoring.detail == nil && scoring.pending == nil &&
                   fixture.transport.commits == 3, "Live revocation removes the opened game and prevents submission")
+        try check(try local.load()?.operations.first?.state == .needsReview && local.load()?.canResume == false,
+                  "A rejected score survives revocation without making the game resumable")
     }
 
     private static func staleAndFailedWrites() async throws {
@@ -332,13 +340,21 @@ struct GroupGameChecks {
         let games = fixture.games(.owner, account: "owner")
         let create = fixture.creation()
         _ = try await games.perform(create)
+        let directory = try temporaryJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let local = try journalGame(in: directory, fixture: fixture, gameID: create.gameID)
+        var loseCompletionResponse = false
         let scoring = GroupGameScoring(hasGroup: { true }, load: {
             let (game, access) = try await games.loadWithAccess(create.gameID)
             return .init(game: game, access: access, scorekeeperName: "You")
-        }, perform: games.perform)
+        }, perform: { operation in
+            let receipt = try await games.perform(operation)
+            if loseCompletionResponse { throw CKError(.networkFailure) }
+            return receipt
+        }, journal: { local })
         scoring.online = true
         await scoring.refresh()
-        guard let initial = scoring.detail?.game.header.version else { throw Failure("No initial revision") }
+        guard let initial = scoring.editVersion else { throw Failure("No initial revision") }
         await scoring.advance(from: initial)
         try check(fixture.transport.commits == 1, "Advancement is unavailable before all seven hands are saved")
         for level in LevelDefinition.all {
@@ -346,7 +362,7 @@ struct GroupGameChecks {
             for id in fixture.playerIDs { scoring.updateScore(for: id, value: "3") }
             await scoring.saveDraft()
         }
-        guard let version = scoring.detail?.game.header.version else { throw Failure("No scored revision") }
+        guard let version = scoring.editVersion else { throw Failure("No scored revision") }
         await scoring.advance(from: version)
         await scoring.advance(from: version)
         try check(scoring.detail?.game.rounds.map(\.hands.count) == [7, 0] && fixture.transport.commits == 9,
@@ -354,10 +370,175 @@ struct GroupGameChecks {
         await scoring.complete(from: version)
         try check(scoring.detail?.game.header.completedAt == nil && fixture.transport.commits == 9,
                   "A completion confirmation uses the version the scorekeeper reviewed")
-        guard let current = scoring.detail?.game.header.version else { throw Failure("No advanced revision") }
+        guard let current = scoring.editVersion else { throw Failure("No advanced revision") }
+        loseCompletionResponse = true
         await scoring.complete(from: current)
-        try check(scoring.detail?.game.header.completedAt != nil && !scoring.canScore && fixture.transport.commits == 10,
-                  "A successful completion reloads the final scores and disables editing")
+        guard let pending = scoring.pending else { throw Failure("Interrupted completion lost its request") }
+        let reopened = try journalGame(in: directory, fixture: fixture, gameID: create.gameID)
+        let resumed = GroupGameScoring(hasGroup: { true }, load: {
+            let (game, access) = try await games.loadWithAccess(create.gameID)
+            return .init(game: game, access: access, scorekeeperName: "You")
+        }, perform: games.perform, journal: { reopened })
+        resumed.online = true
+        await resumed.refresh()
+        try check(resumed.detail?.game.header.completedAt != nil && !resumed.canScore && resumed.canRetry &&
+                  resumed.pending?.id == pending.id && fixture.transport.commits == 10,
+                  "A completed shared snapshot preserves an interrupted completion request for explicit confirmation")
+        await resumed.retry()
+        try check(try resumed.pending == nil && reopened.load()?.operations.isEmpty == true && fixture.transport.commits == 10,
+                  "Retry after restart confirms the completion receipt without completing twice")
+    }
+
+    private static func offlineJournal() async throws {
+        let fixture = Fixture()
+        let games = fixture.games(.owner, account: "owner")
+        let create = fixture.creation()
+        _ = try await games.perform(create)
+        let cloud = try await games.load(create.gameID)
+        let access = try await games.authorize()
+        let directory = try temporaryJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "journal.store")
+        let namespace = GroupGameJournal.Namespace(account: "owner", container: "verification", environment: "Development")
+        let group = GroupSummary(id: fixture.id, zoneOwner: "owner", name: "Journal fixture", isOwner: true)
+        let route = GroupGameRoute(group: group, gameID: create.gameID)
+        let scope = GroupGameJournal.Scope(namespace: namespace, route: route)
+        var failSave = false
+        var forceOffline = false
+        var verified = true
+        var uploads: [GroupGameOperation] = []
+        func makeScoring(_ local: GroupGameJournal.Game) -> GroupGameScoring {
+            GroupGameScoring(hasGroup: { verified }, load: {
+                if forceOffline { throw CKError(.networkUnavailable) }
+                let snapshot = try await games.load(create.gameID)
+                return .init(game: snapshot, access: access, scorekeeperName: "You")
+            }, perform: { operation in
+                uploads.append(operation)
+                return try await games.perform(operation)
+            }, journal: { local })
+        }
+        func enter(_ scoring: GroupGameScoring, round: Int, hand: Int, points: Int) {
+            scoring.beginScores(round: round, hand: hand)
+            for id in fixture.playerIDs { scoring.updateScore(for: id, value: String(points)) }
+        }
+
+        let storedIDs: [UUID]
+        do {
+            let store = try GroupGameJournal(url: url) { context in
+                if failSave { throw Failure("Injected journal disk failure") }
+                try context.save()
+            }
+            let local = GroupGameJournal.Game(store: store, scope: scope)
+            let scoring = makeScoring(local)
+            scoring.online = true
+            await scoring.refresh()
+            try check(scoring.canScore && (try local.load()?.confirmed) == cloud,
+                      "An authorized live game seeds the local journal")
+            scoring.online = false
+
+            let staleEditor = makeScoring(local)
+            await staleEditor.refresh()
+            enter(staleEditor, round: 1, hand: 1, points: 99)
+            enter(scoring, round: 1, hand: 1, points: 3)
+            failSave = true
+            await scoring.saveDraft()
+            try check(scoring.draft?.scores?.values.sorted() == [3, 3] && scoring.changeIssue != nil &&
+                      scoring.detail?.game.rounds[0].hands.isEmpty == true && (try local.load()?.operations.isEmpty) == true,
+                      "A failed disk save keeps the entered values and leaves the scorecard and journal unchanged")
+            failSave = false
+
+            await scoring.saveDraft()
+            await scoring.saveDraft()
+            await staleEditor.saveDraft()
+            try check(try local.load()?.operations.count == 1 && staleEditor.draftNeedsReview &&
+                      staleEditor.draft?.scores?.values.sorted() == [99, 99],
+                      "A second save tap and a stale editor cannot add another hand or overwrite the first")
+
+            for hand in 2...7 {
+                enter(scoring, round: 1, hand: hand, points: 3)
+                await scoring.saveDraft()
+            }
+            guard let nextRoundVersion = scoring.editVersion else { throw Failure("No round edit version") }
+            await scoring.advance(from: nextRoundVersion)
+            await scoring.advance(from: nextRoundVersion)
+            enter(scoring, round: 1, hand: 1, points: 6)
+            await scoring.saveDraft()
+
+            scoring.online = true
+            await scoring.refresh()
+            enter(scoring, round: 2, hand: 1, points: 4)
+            await scoring.saveDraft()
+            try check(uploads.isEmpty && scoring.detail?.game.rounds.map(\.hands.count) == [7, 1],
+                      "Refreshing the same CloudKit version preserves pending scores and a new online save joins the queue")
+
+            scoring.online = false
+            guard let completion = scoring.editVersion else { throw Failure("No completion edit version") }
+            await scoring.complete(from: completion)
+            await scoring.complete(from: completion)
+            guard let entry = try local.load() else { throw Failure("No journal after local completion") }
+            storedIDs = entry.operations.map(\.request.id)
+            try check(entry.confirmed == cloud && entry.operations.map(\.sequence) == Array(1...11) &&
+                      Set(storedIDs).count == 11 && entry.operations[7].roundNumber == 2 &&
+                      entry.operations[8].request.action == .saveHand(round: 1, hand: scored(1, points: 6, cloud)) &&
+                      entry.operations.allSatisfy { $0.state == .pendingSync && $0.request.expectedVersion == nil },
+                      "The durable queue preserves attempt IDs, round order, and the original coordinates of corrections")
+        }
+
+        let reopened = try GroupGameJournal(url: url)
+        let local = GroupGameJournal.Game(store: reopened, scope: scope)
+        let resumed = makeScoring(local)
+        verified = false
+        await resumed.refresh()
+        try check(!resumed.canView && resumed.detail == nil, "Unverified identity cannot open a journal")
+        verified = true
+        await resumed.refresh()
+        try check(try local.load()?.operations.map(\.request.id) == storedIDs &&
+                  resumed.detail?.game.header.status == .completed && resumed.detail?.game.rounds.map(\.hands.count) == [7, 1] &&
+                  resumed.detail?.game.standings().map(\.total) == [28, 28] && !resumed.canScore && uploads.isEmpty,
+                  "An offline reopen restores exact queued IDs, corrected totals, and partial-round completion")
+
+        for other in [GroupGameJournal.Namespace(account: "member", container: "verification", environment: "Development"),
+                      .init(account: "owner", container: "different", environment: "Development"),
+                      .init(account: "owner", container: "verification", environment: "Production")] {
+            let otherGame = GroupGameJournal.Game(store: reopened, scope: .init(namespace: other, route: route))
+            try check(try otherGame.load() == nil && reopened.entries(in: other).isEmpty,
+                      "A different account, container, or environment cannot read the journal")
+        }
+        let otherZone = GroupSummary(id: group.id, zoneOwner: "other-owner", name: group.name, isOwner: group.isOwner)
+        for otherRoute in [GroupGameRoute(group: group, gameID: UUID()), .init(group: otherZone, gameID: route.gameID)] {
+            let otherGame = GroupGameJournal.Game(store: reopened, scope: .init(namespace: namespace, route: otherRoute))
+            try check(try otherGame.load() == nil, "A different game or zone cannot read the journal")
+        }
+
+        resumed.online = true
+        forceOffline = true
+        await resumed.refresh()
+        try check(resumed.detail?.game.header.status == .completed, "An unavailable CloudKit read leaves the local scorecard intact")
+        forceOffline = false
+        _ = try await games.perform(change(cloud, .saveHand(round: 1, hand: scored(1, points: 11, cloud))))
+        await resumed.refresh()
+        try check(try local.load()?.operations.map(\.request.id) == storedIDs && local.load()?.confirmed == cloud &&
+                  local.load()?.needsReview == true && resumed.detail?.game.standings().map(\.total) == [11, 11] &&
+                  !resumed.canScore && uploads.isEmpty,
+                  "A changed shared version is displayed separately and keeps the complete dirty journal for review")
+        _ = try await games.perform(change(try await games.load(create.gameID), .delete))
+        await resumed.refresh()
+        try check(try local.load()?.operations.map(\.request.id) == storedIDs && local.load()?.canResume == false &&
+                  resumed.isDeleted && resumed.detail == nil && uploads.isEmpty,
+                  "Deleting the shared game hides the scorecard and preserves offline work without recreating the game")
+    }
+
+    private static func temporaryJournalDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private static func journalGame(in directory: URL, fixture: Fixture, gameID: UUID) throws -> GroupGameJournal.Game {
+        let store = try GroupGameJournal(url: directory.appending(path: "journal.store"))
+        let namespace = GroupGameJournal.Namespace(account: "fixture", container: "verification", environment: "Development")
+        let group = GroupSummary(id: fixture.id, zoneOwner: "owner", name: "Journal fixture", isOwner: true)
+        return GroupGameJournal.Game(store: store, scope: .init(namespace: namespace, route: .init(group: group, gameID: gameID)))
     }
 
     private static func ownerReassignment() async throws {
@@ -374,12 +555,15 @@ struct GroupGameChecks {
         let ownerKey = fixture.scorekeeperKey("owner-participant")
         let memberKey = fixture.scorekeeperKey("member-participant")
         let otherKey = fixture.scorekeeperKey("other-participant")
+        let directory = try temporaryJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let local = try journalGame(in: directory, fixture: fixture, gameID: create.gameID)
         func openAsOwner(scorekeeperName: String?) async -> GroupGameScoring {
             let scoring = GroupGameScoring(hasGroup: { true }, load: {
                 let (game, access) = try await owner.loadWithAccess(create.gameID)
                 let name = access.isScorekeeper(game.header.scorekeeperKey) ? "You" : scorekeeperName
                 return .init(game: game, access: access, scorekeeperName: name)
-            }, perform: owner.perform)
+            }, perform: owner.perform, journal: { local })
             scoring.online = true
             await scoring.refresh()
             return scoring

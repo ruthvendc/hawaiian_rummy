@@ -49,6 +49,13 @@
             ReferencedContainer = "container:hawiian_rummy_scorekeeper.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "RUMMY_GROUP_ACCOUNT_DIAGNOSTIC"
+            value = "offline"
+            isEnabled = "NO">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

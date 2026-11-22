@@ -27,16 +27,17 @@ struct GroupsFoundationChecks {
         let cache = try GroupCache(url: cacheURL)
         try cache.save(GroupCacheSnapshot(groups: [owned, joined], pendingLinks: [link]), account: "A")
         let reopened = GroupsModel(containerIdentifier: "unused-in-local-checks", cacheURL: cacheURL)
-        try check(reopened.groups.isEmpty, "Hide cache before resolving the account")
+        try check(reopened.groups.isEmpty && reopened.scoringAccount == nil, "Hide cache and journal before resolving the account")
         await reopened.refresh(accountID: { "A" }, discover: { throw CKError(.networkUnavailable) })
         try check(reopened.isStale && reopened.groups == [owned, joined], "Retain current account cache after a network failure")
         try check(reopened.snapshot.pendingLinks == [link], "Retain account’s pending invitation across relaunch")
+        try check(reopened.scoringAccount == "A", "A resolved account can unlock local scoring when group discovery is offline")
 
         reopened.prepareForAccountRefresh()
         await reopened.refresh(accountID: { throw GroupRepositoryError.accountTemporarilyUnavailable }, discover: { [] })
-        try check(reopened.groups == [owned, joined] && reopened.account == "A" && reopened.isStale &&
+        try check(reopened.groups == [owned, joined] && reopened.account == "A" && reopened.scoringAccount == nil && reopened.isStale &&
                   reopened.snapshot.pendingLinks == [link],
-                  "An account availability notification followed by offline failure retains groups and invitations")
+                  "Unresolved identity locks local scoring while keeping the group and invitation cache")
         await reopened.refresh(accountID: { throw CKError(.notAuthenticated) }, discover: { [] })
         try check(reopened.groups == [owned, joined] && reopened.account == "A" && reopened.isStale,
                   "A request authentication failure does not confirm sign-out or discard cached groups")
@@ -45,7 +46,8 @@ struct GroupsFoundationChecks {
                   "Failed account refreshes do not replace the persisted cache with an empty list")
 
         await reopened.refresh(accountID: { "B" }, discover: { [other] })
-        try check(reopened.groups == [other] && reopened.snapshot.pendingLinks.isEmpty, "Switch accounts without leaking cached groups or links")
+        try check(reopened.groups == [other] && reopened.scoringAccount == "B" && reopened.snapshot.pendingLinks.isEmpty,
+                  "Switch accounts without leaking cached groups or links or unlocking the old journal")
         let original = try cache.load(account: "A")
         try check(original.groups == [owned, joined] && original.pendingLinks == [link], "Retain first account’s private cache")
 

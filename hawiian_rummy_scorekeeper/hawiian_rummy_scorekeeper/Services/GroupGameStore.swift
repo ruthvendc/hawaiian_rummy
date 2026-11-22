@@ -191,17 +191,9 @@ struct GroupGameStore {
             throw GroupGameError.invalidTransition
         case .saveHand(let number, let hand):
             guard (1...header.roundCount).contains(number) else { throw GroupGameError.invalidTransition }
-            try validate(hand, participants: header.participants)
+            try GroupGameScoringTransition.validate(hand, participants: header.participants)
             let (roundEntry, round) = try await fetchRound(number, header: header)
-            var hands = round.hands
-            if hand.number <= hands.count {
-                hands[hand.number - 1] = hand
-            } else {
-                guard number == header.roundCount, hand.number == hands.count + 1 else {
-                    throw GroupGameError.invalidTransition
-                }
-                hands.append(hand)
-            }
+            let hands = try GroupGameScoringTransition.hands(saving: hand, in: round, currentRound: header.roundCount)
             roundEntry.record["hands"] = try encode(hands)
             return ([entry, roundEntry], [])
         case .startNextRound:
@@ -209,8 +201,7 @@ struct GroupGameStore {
                 throw GroupGameError.invalidTransition
             }
             let (_, current) = try await fetchRound(header.roundCount, header: header)
-            guard current.hands.count == LevelDefinition.all.count else { throw GroupGameError.invalidTransition }
-            let next = header.roundCount + 1
+            let next = try GroupGameScoringTransition.nextRound(after: current)
             entry.record["roundCount"] = next
             return ([entry, try newRound(game: game, number: next)], [])
         case .complete:
@@ -327,16 +318,10 @@ struct GroupGameStore {
         let hands = try decode([GroupGameHand].self, from: entry.record, field: "hands")
         for (index, hand) in hands.enumerated() {
             guard hand.number == index + 1 else { throw GroupGameError.invalidRecord }
-            do { try validate(hand, participants: header.participants) }
+            do { try GroupGameScoringTransition.validate(hand, participants: header.participants) }
             catch { throw GroupGameError.invalidRecord }
         }
         return (entry, GroupGameRound(id: .init(gameID: header.id, number: number), hands: hands))
-    }
-
-    private func validate(_ hand: GroupGameHand, participants: [GroupGameParticipant]) throws {
-        guard (1...LevelDefinition.all.count).contains(hand.number), hand.scores.count == participants.count,
-              Set(hand.scores.map(\.playerID)) == Set(participants.map(\.playerID)),
-              hand.scores.allSatisfy({ $0.points >= 0 }) else { throw GroupGameError.invalidScores }
     }
 
     private func findReceipt(
