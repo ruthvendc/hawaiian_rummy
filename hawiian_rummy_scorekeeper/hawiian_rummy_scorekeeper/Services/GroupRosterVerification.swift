@@ -93,7 +93,7 @@ enum GroupRosterVerification {
             let key = roster.playerID(example.id)
             let existing = try await roster.store.record(for: key)
             try require(existing == nil, "Use a fresh disposable group for the first retry check.")
-            let interrupted = intercept(roster, afterSave: { throw GroupRosterWriteError.unconfirmed(CKError(.networkFailure)) })
+            let interrupted = intercept(roster, afterSave: { throw GroupAtomicWriteError.unconfirmed(CKError(.networkFailure)) })
             let recovered = try await interrupted.add(example)
             let retried = try await roster.add(example)
             let matching = try await roster.players().filter { $0.id == example.id }
@@ -119,7 +119,7 @@ enum GroupRosterVerification {
         do {
             _ = try await roster.store.saveAtomically([collision, orphan])
             throw Failure("CloudKit unexpectedly accepted a conditional create for an existing player ID.")
-        } catch GroupRosterWriteError.conflict {
+        } catch GroupAtomicWriteError.conflict {
             let record = try await roster.store.record(for: key)
             try require(record == nil, "The rejected player write left an orphaned name reservation.")
         }
@@ -176,10 +176,10 @@ enum GroupRosterVerification {
         let beforeSave: () async throws -> Void
         let afterSave: () throws -> Void
 
-        func record(for id: CKRecord.ID) async throws -> GroupRosterRecord? { try await base.record(for: id) }
-        func records() async throws -> [GroupRosterRecord] { try await base.records() }
+        func record(for id: CKRecord.ID) async throws -> GroupStoredRecord? { try await base.record(for: id) }
+        func records() async throws -> [GroupStoredRecord] { try await base.records() }
 
-        func saveAtomically(_ records: [GroupRosterRecord]) async throws -> [CKRecord.ID: GroupRosterRecord] {
+        func saveAtomically(_ records: [GroupStoredRecord]) async throws -> [CKRecord.ID: GroupStoredRecord] {
             try await beforeSave()
             let saved = try await base.saveAtomically(records)
             try afterSave()

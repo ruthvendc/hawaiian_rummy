@@ -63,33 +63,8 @@ struct GroupRosterContents {
     let players: [GroupPlayerIdentity]
 }
 
-struct GroupRosterRecord {
-    let record: CKRecord
-    let changeTag: String?
-
-    init(_ record: CKRecord, changeTag: String? = nil) {
-        self.record = record
-        self.changeTag = changeTag ?? record.recordChangeTag
-    }
-}
-
-enum GroupRosterWriteError: LocalizedError {
-    case conflict
-    case unconfirmed(any Error)
-
-    var errorDescription: String? {
-        switch self {
-        case .conflict: GroupRosterError.stalePlayer.errorDescription
-        case .unconfirmed(let error):
-            "Couldn’t confirm the roster save. Refresh before trying again. \(error.localizedDescription)"
-        }
-    }
-}
-
-protocol GroupRosterStore {
-    func record(for id: CKRecord.ID) async throws -> GroupRosterRecord?
-    func records() async throws -> [GroupRosterRecord]
-    func saveAtomically(_ records: [GroupRosterRecord]) async throws -> [CKRecord.ID: GroupRosterRecord]
+protocol GroupRosterStore: GroupRecordStore {
+    func records() async throws -> [GroupStoredRecord]
 }
 
 struct GroupRoster {
@@ -141,7 +116,7 @@ struct GroupRoster {
             return confirmed
         }
         let key = reservationID(for: name)
-        let entry: GroupRosterRecord
+        let entry: GroupStoredRecord
         do {
             entry = try await availableReservation(key, for: draft.id)
         } catch let error as GroupRosterError where [.duplicateName, .reservationMismatch].contains(error) {
@@ -157,7 +132,7 @@ struct GroupRoster {
         entry.record["playerID"] = draft.id.uuidString
         do {
             return try await save([player, entry], player: player.record.recordID, access: access)
-        } catch let error as GroupRosterWriteError {
+        } catch let error as GroupAtomicWriteError {
             let current = try await authorize()
             try current.requireAdd()
             if let confirmed = try await findAddedPlayer(draft.id, name: name, access: current) {
@@ -194,7 +169,7 @@ struct GroupRoster {
         entry.record["displayName"] = name
         do {
             return try await save(changes, player: entry.record.recordID, access: access)
-        } catch GroupRosterWriteError.conflict {
+        } catch GroupAtomicWriteError.conflict {
             _ = try await fetchForEdit(original)
             if old.record.recordID != destination {
                 _ = try await availableReservation(destination, for: current.id)
@@ -215,7 +190,7 @@ struct GroupRoster {
         entry.record["retiredAt"] = retired ? Date.now : nil
         do {
             return try await save([entry], player: entry.record.recordID, access: access)
-        } catch GroupRosterWriteError.conflict {
+        } catch GroupAtomicWriteError.conflict {
             _ = try await fetchForEdit(original)
             throw GroupRosterError.stalePlayer
         }
@@ -223,7 +198,7 @@ struct GroupRoster {
 
     // MARK: - Reads and conditional writes
 
-    private func fetchForEdit(_ original: GroupPlayerIdentity) async throws -> (GroupRosterRecord, GroupPlayerIdentity) {
+    private func fetchForEdit(_ original: GroupPlayerIdentity) async throws -> (GroupStoredRecord, GroupPlayerIdentity) {
         guard original.groupID == groupID else { throw GroupRosterError.wrongGroup }
         let id = playerID(original.id)
         guard let entry = try await store.record(for: id) else { throw GroupRosterError.playerNotFound }
@@ -248,7 +223,7 @@ struct GroupRoster {
         return current
     }
 
-    private func heldReservation(for player: GroupPlayerIdentity) async throws -> GroupRosterRecord {
+    private func heldReservation(for player: GroupPlayerIdentity) async throws -> GroupStoredRecord {
         let key = reservationID(for: player.displayName)
         if let entry = try await store.record(for: key), try reservationOwner(entry, id: key) == player.id {
             return entry
@@ -261,7 +236,7 @@ struct GroupRoster {
         throw GroupRosterError.reservationMismatch
     }
 
-    private func availableReservation(_ key: CKRecord.ID, for player: UUID) async throws -> GroupRosterRecord {
+    private func availableReservation(_ key: CKRecord.ID, for player: UUID) async throws -> GroupStoredRecord {
         guard let entry = try await store.record(for: key) else {
             return newChild(GroupRecordTypes.playerName, id: key)
         }
@@ -273,14 +248,14 @@ struct GroupRoster {
     }
 
     private func save(
-        _ batch: [GroupRosterRecord], player id: CKRecord.ID, access initial: GroupRosterAccess
+        _ batch: [GroupStoredRecord], player id: CKRecord.ID, access initial: GroupRosterAccess
     ) async throws -> GroupPlayerIdentity {
         guard try await authorize() == initial else { throw GroupRosterError.notAuthorized }
         try Task.checkCancellation()
         let saved = try await store.saveAtomically(batch)
         try await verifyAccount()
         guard let entry = saved[id], entry.record.recordID == id else {
-            throw GroupRosterWriteError.unconfirmed(GroupRosterError.invalidRecord)
+            throw GroupAtomicWriteError.unconfirmed(GroupRosterError.invalidRecord)
         }
         return try player(from: entry)
     }
@@ -306,17 +281,17 @@ struct GroupRoster {
         return name
     }
 
-    func newChild(_ type: String, id: CKRecord.ID) -> GroupRosterRecord {
+    func newChild(_ type: String, id: CKRecord.ID) -> GroupStoredRecord {
         let record = CKRecord(recordType: type, recordID: id)
         record.setParent(root)
-        return GroupRosterRecord(record)
+        return GroupStoredRecord(record)
     }
 
     private func isChild(_ record: CKRecord, type: String) -> Bool {
         record.recordType == type && record.recordID.zoneID == root.zoneID && record.parent?.recordID == root
     }
 
-    func player(from entry: GroupRosterRecord) throws -> GroupPlayerIdentity {
+    func player(from entry: GroupStoredRecord) throws -> GroupPlayerIdentity {
         let record = entry.record
         guard isChild(record, type: GroupRecordTypes.player),
               let id = UUID(uuidString: String(record.recordID.recordName.dropFirst(Self.playerPrefix.count))),
@@ -331,7 +306,7 @@ struct GroupRoster {
         )
     }
 
-    func reservationOwner(_ entry: GroupRosterRecord, id: CKRecord.ID) throws -> UUID? {
+    func reservationOwner(_ entry: GroupStoredRecord, id: CKRecord.ID) throws -> UUID? {
         let record = entry.record
         let name = id.recordName
         guard isChild(record, type: GroupRecordTypes.playerName), record.recordID == id, entry.changeTag != nil,

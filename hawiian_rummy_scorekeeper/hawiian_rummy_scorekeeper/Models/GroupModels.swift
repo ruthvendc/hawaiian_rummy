@@ -13,6 +13,9 @@ enum GroupRecordTypes {
     static let player = "GroupPlayerV1"
     static let playerName = "GroupPlayerNameV1"
     static let memberDisplayName = "GroupMemberDisplayNameV1"
+    static let game = "GroupGameV1"
+    static let gameRound = "GroupGameRoundV1"
+    static let gameOperation = "GroupGameOperationV1"
 }
 
 enum GroupMemberDisplayName {

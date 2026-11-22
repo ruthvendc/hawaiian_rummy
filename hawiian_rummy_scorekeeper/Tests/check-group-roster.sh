@@ -11,6 +11,7 @@ xcrun --sdk macosx swiftc -D DEBUG -default-isolation MainActor \
     "$source_dir/Models/GroupModels.swift" \
     "$source_dir/Models/PlayerName.swift" \
     "$source_dir/Services/GroupRoster.swift" \
+    "$source_dir/Services/GroupCloudStore.swift" \
     "$source_dir/Services/GroupRosterCloudStore.swift" \
     "$project_dir/Tests/GroupRosterChecks.swift" \
     -o "$output_dir/GroupRosterChecks"

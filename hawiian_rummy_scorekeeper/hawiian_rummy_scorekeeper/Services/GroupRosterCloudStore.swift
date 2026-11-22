@@ -8,18 +8,17 @@ struct GroupRosterCloudStore: GroupRosterStore {
     let verifyAccount: () async throws -> Void
     private var zoneID: CKRecordZone.ID { root.zoneID }
 
-    func record(for id: CKRecord.ID) async throws -> GroupRosterRecord? {
-        guard id.zoneID == zoneID else { throw GroupRosterError.wrongGroup }
-        do {
-            return GroupRosterRecord(try await database.record(for: id))
-        } catch let error as CKError where error.code == .unknownItem {
-            // Only the requested child may be missing. Verify the share separately.
-            return nil
-        }
+    private var cloud: GroupCloudStore {
+        GroupCloudStore(database: database, zoneID: zoneID, verifyAccount: verifyAccount)
     }
 
-    func records() async throws -> [GroupRosterRecord] {
-        var records: [CKRecord.ID: GroupRosterRecord] = [:]
+    func record(for id: CKRecord.ID) async throws -> GroupStoredRecord? {
+        guard id.zoneID == zoneID else { throw GroupRosterError.wrongGroup }
+        return try await cloud.record(for: id)
+    }
+
+    func records() async throws -> [GroupStoredRecord] {
+        var records: [CKRecord.ID: GroupStoredRecord] = [:]
         var token: CKServerChangeToken?
         while true {
             let page = try await database.recordZoneChanges(inZoneWith: zoneID, since: token)
@@ -29,7 +28,7 @@ struct GroupRosterCloudStore: GroupRosterStore {
                     if id.recordName.hasPrefix(GroupRoster.playerPrefix) ||
                         record.recordType == GroupRecordTypes.player || record.recordType == GroupRecordTypes.playerName {
                         guard record.recordID == id else { throw GroupRosterError.invalidRecord }
-                        records[id] = GroupRosterRecord(record)
+                        records[id] = GroupStoredRecord(record)
                     }
                 } else if id.recordName.hasPrefix(GroupRoster.playerPrefix) {
                     _ = try result.get()
@@ -41,66 +40,19 @@ struct GroupRosterCloudStore: GroupRosterStore {
         }
     }
 
-    func saveAtomically(_ records: [GroupRosterRecord]) async throws -> [CKRecord.ID: GroupRosterRecord] {
-        let updates = records.map(\.record)
-        guard updates.allSatisfy({ $0.recordID.zoneID == zoneID }) else { throw GroupRosterError.wrongGroup }
-        guard !records.isEmpty, records.allSatisfy({ entry in
-            let record = entry.record
-            return record.parent?.recordID == root && entry.changeTag == record.recordChangeTag &&
-                [GroupRecordTypes.player, GroupRecordTypes.playerName].contains(record.recordType)
+    func saveAtomically(_ records: [GroupStoredRecord]) async throws -> [CKRecord.ID: GroupStoredRecord] {
+        guard records.allSatisfy({ $0.record.recordID.zoneID == zoneID }) else { throw GroupRosterError.wrongGroup }
+        guard records.allSatisfy({ entry in
+            entry.record.parent?.recordID == root &&
+                [GroupRecordTypes.player, GroupRecordTypes.playerName].contains(entry.record.recordType)
         }) else { throw GroupRosterError.invalidRecord }
-        let zone = try await database.recordZone(for: zoneID)
-        guard zone.zoneID == zoneID, zone.capabilities.contains(.atomic) else {
-            throw GroupRosterError.atomicUnavailable
-        }
-        try await verifyAccount()
-        try Task.checkCancellation()
-        let results: [CKRecord.ID: Result<CKRecord, any Error>]
         do {
-            results = try await database.modifyRecords(
-                saving: updates, deleting: [], savePolicy: .ifServerRecordUnchanged, atomically: true
-            ).saveResults
-        } catch {
-            let partial = (error as? CKError)?.partialErrorsByItemID
-            throw Self.writeFailure(partial.map { Array($0.values) } ?? [error])
+            return try await cloud.saveAtomically(records)
+        } catch GroupCloudStoreError.atomicUnavailable {
+            throw GroupRosterError.atomicUnavailable
+        } catch GroupCloudStoreError.invalidBatch {
+            throw GroupRosterError.invalidRecord
         }
-        let errors = results.values.compactMap { result -> (any Error)? in
-            guard case .failure(let error) = result else { return nil }
-            return error
-        }
-        if !errors.isEmpty { throw Self.writeFailure(errors) }
-        var saved: [CKRecord.ID: GroupRosterRecord] = [:]
-        for record in updates {
-            guard let result = results[record.recordID] else {
-                throw GroupRosterWriteError.unconfirmed(GroupRosterError.invalidRecord)
-            }
-            let confirmed = GroupRosterRecord(try result.get())
-            guard confirmed.changeTag != nil else {
-                throw GroupRosterWriteError.unconfirmed(GroupRosterError.invalidRecord)
-            }
-            saved[record.recordID] = confirmed
-        }
-        return saved
-    }
-
-    static func writeFailure(_ errors: [any Error]) -> any Error {
-        let causes = errors.filter { ($0 as? CKError)?.code != .batchRequestFailed }
-        let conflicts: Set<CKError.Code> = [.serverRecordChanged, .constraintViolation, .unknownItem]
-        if !causes.isEmpty, causes.allSatisfy({ error in
-            (error as? CKError).map { conflicts.contains($0.code) } == true
-        }) {
-            return GroupRosterWriteError.conflict
-        }
-        let other = causes.first { error in
-            (error as? CKError).map { !conflicts.contains($0.code) } ?? true
-        } ?? errors.first ?? GroupRosterError.invalidRecord
-        if let cloud = other as? CKError,
-           [.permissionFailure, .zoneNotFound, .participantMayNeedVerification, .notAuthenticated,
-            .invalidArguments, .serverRejectedRequest, .quotaExceeded, .requestRateLimited,
-            .limitExceeded, .referenceViolation, .missingEntitlement].contains(cloud.code) {
-            return cloud
-        }
-        return GroupRosterWriteError.unconfirmed(other)
     }
 }
 #endif

@@ -210,6 +210,11 @@ struct GroupRepository {
         )
     }
 
+    func cloudStore(for group: GroupSummary, account: String) -> GroupCloudStore {
+        GroupCloudStore(database: database(for: group), zoneID: rootID(for: group).zoneID,
+                        verifyAccount: { try await self.verifyAccount(account) })
+    }
+
     private func rosterAccess(for group: GroupSummary, account: String) async throws -> GroupRosterAccess {
         try await verifyAccount(account)
         let root: CKRecord

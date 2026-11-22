@@ -172,10 +172,10 @@ struct GroupRosterChecks {
         try await expect(.reservationMismatch, "Never release a different player’s reservation") {
             _ = try await owner.rename(player, to: "Another name")
         }
-        let conflict = GroupRosterCloudStore.writeFailure([CKError(.batchRequestFailed), CKError(.serverRecordChanged)])
-        guard case GroupRosterWriteError.conflict = conflict else { throw Failure("Batch conflict was misclassified") }
-        let ambiguous = GroupRosterCloudStore.writeFailure([CKError(.networkFailure)])
-        guard case GroupRosterWriteError.unconfirmed = ambiguous else { throw Failure("Lost response was misclassified") }
+        let conflict = GroupCloudStore.writeFailure([CKError(.batchRequestFailed), CKError(.serverRecordChanged)])
+        guard case GroupAtomicWriteError.conflict = conflict else { throw Failure("Batch conflict was misclassified") }
+        let ambiguous = GroupCloudStore.writeFailure([CKError(.networkFailure)])
+        guard case GroupAtomicWriteError.unconfirmed = ambiguous else { throw Failure("Lost response was misclassified") }
     }
 
     private static func draft(_ name: String) -> GroupPlayerDraft { GroupPlayerDraft(id: UUID(), displayName: name) }
@@ -221,32 +221,32 @@ struct GroupRosterChecks {
     }
 
     private final class MemoryStore: GroupRosterStore {
-        var rows: [CKRecord.ID: GroupRosterRecord] = [:]
+        var rows: [CKRecord.ID: GroupStoredRecord] = [:]
         var beforeSave: (() async throws -> Void)?
         var loseResponse = false
         var atomic = true
         private(set) var successfulWrites = 0
         private(set) var lastBatch: [CKRecord.ID] = []
 
-        func record(for id: CKRecord.ID) async throws -> GroupRosterRecord? {
+        func record(for id: CKRecord.ID) async throws -> GroupStoredRecord? {
             try rows[id].map { try copy($0, tag: $0.changeTag) }
         }
 
-        func records() async throws -> [GroupRosterRecord] {
+        func records() async throws -> [GroupStoredRecord] {
             try rows.values.map { try copy($0, tag: $0.changeTag) }
         }
 
-        func saveAtomically(_ records: [GroupRosterRecord]) async throws -> [CKRecord.ID: GroupRosterRecord] {
+        func saveAtomically(_ records: [GroupStoredRecord]) async throws -> [CKRecord.ID: GroupStoredRecord] {
             guard atomic else { throw GroupRosterError.atomicUnavailable }
             let interleave = beforeSave
             beforeSave = nil
             try await interleave?()
             guard records.allSatisfy({ rows[$0.record.recordID]?.changeTag == $0.changeTag }) else {
-                throw GroupRosterWriteError.conflict
+                throw GroupAtomicWriteError.conflict
             }
             successfulWrites += 1
             lastBatch = records.map { $0.record.recordID }
-            var result: [CKRecord.ID: GroupRosterRecord] = [:]
+            var result: [CKRecord.ID: GroupStoredRecord] = [:]
             for entry in records {
                 let key = entry.record.recordID
                 let stored = try copy(entry, tag: String(successfulWrites))
@@ -255,14 +255,14 @@ struct GroupRosterChecks {
             }
             if loseResponse {
                 loseResponse = false
-                throw GroupRosterWriteError.unconfirmed(CKError(.networkFailure))
+                throw GroupAtomicWriteError.unconfirmed(CKError(.networkFailure))
             }
             return result
         }
 
-        private func copy(_ entry: GroupRosterRecord, tag: String?) throws -> GroupRosterRecord {
+        private func copy(_ entry: GroupStoredRecord, tag: String?) throws -> GroupStoredRecord {
             guard let record = entry.record.copy() as? CKRecord else { throw Failure("Couldn’t copy test record") }
-            return GroupRosterRecord(record, changeTag: tag)
+            return GroupStoredRecord(record, changeTag: tag)
         }
     }
 }

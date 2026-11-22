@@ -57,6 +57,7 @@ struct hawiian_rummy_scorekeeperApp: App {
                 }
                 .task {
                     await GroupRosterVerification.runIfRequested(containerIdentifier: Self.cloudKitContainerID)
+                    await GroupGameVerification.runIfRequested(containerIdentifier: Self.cloudKitContainerID)
                 }
             #else
             appContent

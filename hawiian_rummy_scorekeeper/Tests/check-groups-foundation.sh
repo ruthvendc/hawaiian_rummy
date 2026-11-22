@@ -13,6 +13,7 @@ xcrun --sdk macosx swiftc -D DEBUG -default-isolation MainActor \
     "$source_dir/Services/GroupCache.swift" \
     "$source_dir/Services/GroupRepository.swift" \
     "$source_dir/Services/GroupRoster.swift" \
+    "$source_dir/Services/GroupCloudStore.swift" \
     "$source_dir/Services/GroupRosterCloudStore.swift" \
     "$source_dir/Services/GroupsModel.swift" \
     "$project_dir/Tests/GroupsFoundationChecks.swift" \
