@@ -8,6 +8,24 @@ struct GroupCacheSnapshot: Codable, Equatable {
     // Optional so previously saved snapshots decode without a migration.
     var memberNameDrafts: [UUID: String]?
     var groupDetails: [UUID: CachedGroupDetails]?
+    var groupRosters: [UUID: CachedGroupRoster]?
+}
+
+struct CachedGroupRoster: Codable, Equatable {
+    struct Player: Codable, Equatable, Identifiable {
+        let id: UUID
+        let displayName: String
+        let isRetired: Bool
+
+        init(_ player: GroupPlayerIdentity) {
+            id = player.id
+            displayName = player.displayName
+            isRetired = player.retiredAt != nil
+        }
+    }
+
+    let zoneOwner: String
+    var players: [Player]
 }
 
 // Display-only data. Cached membership never supplies CloudKit authorization or actions.

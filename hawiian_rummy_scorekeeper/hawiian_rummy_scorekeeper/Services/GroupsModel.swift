@@ -7,6 +7,12 @@ enum PendingInvitationState: Equatable {
     case waiting, joining, joined, needsVerification, unavailable, retrying
 }
 
+enum GroupRosterChange {
+    case add(GroupPlayerDraft)
+    case rename(GroupPlayerIdentity, String)
+    case setRetired(GroupPlayerIdentity, Bool)
+}
+
 @Observable
 final class GroupsModel {
     @ObservationIgnored private lazy var repository = GroupRepository(containerIdentifier: containerIdentifier)
@@ -30,8 +36,11 @@ final class GroupsModel {
     var actionIssue: String?
 
     private var generation = UUID()
+    @ObservationIgnored private var rosterRequests: [UUID: UUID] = [:]
+    @ObservationIgnored private var rosterWrites: [UUID: UUID] = [:]
 
     var groups: [GroupSummary] { snapshot.groups }
+    var accountGeneration: UUID { generation }
 
     init(containerIdentifier: String, cacheURL: URL? = nil) {
         self.containerIdentifier = containerIdentifier
@@ -129,9 +138,17 @@ final class GroupsModel {
             let groups = try await discover()
             guard try await accountID() == verified else { throw GroupRepositoryError.accountChanged }
             guard generation == started else { return }
-            snapshot.groups = groups
             let visible = Set(groups.map(\.id))
+            let previous = Dictionary(snapshot.groups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let sameScope = Set(groups.filter { group in
+                previous[group.id]?.zoneOwner == group.zoneOwner && previous[group.id]?.isOwner == group.isOwner
+            }.map(\.id))
+            snapshot.groups = groups
             snapshot.groupDetails = snapshot.groupDetails?.filter { visible.contains($0.key) }
+            let zoneOwners = Dictionary(groups.map { ($0.id, $0.zoneOwner) }, uniquingKeysWith: { first, _ in first })
+            snapshot.groupRosters = snapshot.groupRosters?.filter { zoneOwners[$0.key] == $0.value.zoneOwner }
+            rosterRequests = rosterRequests.filter { sameScope.contains($0.key) }
+            rosterWrites = rosterWrites.filter { sameScope.contains($0.key) }
             for url in snapshot.pendingLinks {
                 let key = Self.invitationKey(url)
                 if let id = resolved[key], visible.contains(id) {
@@ -207,9 +224,7 @@ final class GroupsModel {
             if Self.isAccountLoss(error) {
                 invalidateAccount()
             } else if Self.isAccessLoss(error) {
-                snapshot.groups.removeAll { $0.id == group.id }
-                snapshot.groupDetails?.removeValue(forKey: group.id)
-                saveCache()
+                removeCachedGroup(group.id)
             }
             throw error
         }
@@ -218,6 +233,125 @@ final class GroupsModel {
     func cachedDetails(for group: GroupSummary) -> CachedGroupDetails? {
         guard account != nil, groups.contains(where: { $0.id == group.id }) else { return nil }
         return snapshot.groupDetails?[group.id]
+    }
+
+    func cachedRoster(for group: GroupSummary) -> CachedGroupRoster? {
+        guard account != nil, containsRosterGroup(group),
+              let saved = snapshot.groupRosters?[group.id], saved.zoneOwner == group.zoneOwner else { return nil }
+        return saved
+    }
+
+    func loadRoster(for group: GroupSummary) async throws -> GroupRosterContents {
+        try await loadRoster(for: group) { account in
+            try await self.withCloudRoster(for: group, account: account) { try await $0.contents() }
+        }
+    }
+
+    func loadRoster(
+        for group: GroupSummary, fetch: (String) async throws -> GroupRosterContents
+    ) async throws -> GroupRosterContents {
+        try Task.checkCancellation()
+        guard containsRosterGroup(group) else { throw GroupRosterError.accessLost }
+        let request = UUID()
+        rosterRequests[group.id] = request
+        defer {
+            if rosterRequests[group.id] == request { rosterRequests[group.id] = nil }
+        }
+        return try await withRosterSession(for: group, operation: fetch, isCurrent: {
+            self.rosterRequests[group.id] == request && !Task.isCancelled
+        }) { result in
+            self.saveRoster(result.players.map { CachedGroupRoster.Player($0) }, for: group)
+        }
+    }
+
+    func changeRoster(_ change: GroupRosterChange, in group: GroupSummary, session: UUID) async throws {
+        try await changeRoster(in: group, session: session) { account in
+            try await self.withCloudRoster(for: group, account: account) { roster in
+                switch change {
+                case .add(let draft): try await roster.add(draft)
+                case .rename(let player, let name): try await roster.rename(player, to: name)
+                case .setRetired(let player, let retired): try await roster.setRetired(retired, player: player)
+                }
+            }
+        }
+    }
+
+    func changeRoster(
+        in group: GroupSummary, session: UUID, save: (String) async throws -> GroupPlayerIdentity
+    ) async throws {
+        guard generation == session else { throw GroupRepositoryError.accountChanged }
+        try Task.checkCancellation()
+        guard containsRosterGroup(group) else { throw GroupRosterError.accessLost }
+        guard rosterWrites[group.id] == nil else { throw GroupRosterError.writeInProgress }
+        let request = UUID()
+        rosterWrites[group.id] = request
+        defer {
+            if rosterWrites[group.id] == request { rosterWrites[group.id] = nil }
+        }
+        _ = try await withRosterSession(for: group, operation: save, isCurrent: {
+            self.rosterWrites[group.id] == request
+        }) { player in
+            guard player.groupID == group.id else { throw GroupRosterError.wrongGroup }
+            self.rosterRequests[group.id] = nil
+            guard var cached = self.cachedRoster(for: group)?.players else { return }
+            cached.removeAll { $0.id == player.id }
+            cached.append(CachedGroupRoster.Player(player))
+            self.saveRoster(cached, for: group)
+        }
+    }
+
+    private func withCloudRoster<Result>(
+        for group: GroupSummary, account: String, operation: (GroupRoster) async throws -> Result
+    ) async throws -> Result {
+        let roster = repository.roster(for: group, account: account)
+        do {
+            return try await operation(roster)
+        } catch where Self.isAccessLoss(error) {
+            // A child record or a write can fail even when the share is still accessible.
+            _ = try await roster.authorize()
+            throw error
+        }
+    }
+
+    private func withRosterSession<Result>(
+        for group: GroupSummary, operation: (String) async throws -> Result,
+        isCurrent: () -> Bool, apply: (Result) throws -> Void
+    ) async throws -> Result {
+        guard let account else { throw GroupRepositoryError.unavailable }
+        let started = generation
+        do {
+            let result = try await operation(account)
+            guard generation == started else { throw GroupRepositoryError.accountChanged }
+            guard isCurrent() else { throw CancellationError() }
+            guard containsRosterGroup(group) else { throw GroupRosterError.accessLost }
+            try apply(result)
+            return result
+        } catch {
+            guard generation == started else { throw GroupRepositoryError.accountChanged }
+            // A superseded request cannot modify or remove a newly loaded roster.
+            guard isCurrent() else { throw CancellationError() }
+            if Self.isAccountLoss(error) {
+                invalidateAccount()
+            } else if (error as? GroupRosterError) == .accessLost, containsRosterGroup(group) {
+                removeCachedGroup(group.id)
+            }
+            throw error
+        }
+    }
+
+    private func containsRosterGroup(_ group: GroupSummary) -> Bool {
+        groups.contains { $0.id == group.id && $0.zoneOwner == group.zoneOwner && $0.isOwner == group.isOwner }
+    }
+
+    private func saveRoster(_ players: [CachedGroupRoster.Player], for group: GroupSummary) {
+        var rosters = snapshot.groupRosters ?? [:]
+        let sorted = players.sorted {
+            let order = $0.displayName.localizedStandardCompare($1.displayName)
+            return order == .orderedSame ? $0.id.uuidString < $1.id.uuidString : order == .orderedAscending
+        }
+        rosters[group.id] = CachedGroupRoster(zoneOwner: group.zoneOwner, players: sorted)
+        snapshot.groupRosters = rosters
+        saveCache()
     }
 
     @discardableResult
@@ -260,9 +394,7 @@ final class GroupsModel {
                 try await self.repository.leave(group, account: account)
             }
             return {
-                self.snapshot.groups.removeAll { $0.id == group.id }
-                self.snapshot.groupDetails?.removeValue(forKey: group.id)
-                self.saveCache()
+                self.removeCachedGroup(group.id)
             }
         }
         if success { await refresh() }
@@ -434,10 +566,21 @@ final class GroupsModel {
         saveCache()
     }
 
+    private func removeCachedGroup(_ id: UUID) {
+        snapshot.groups.removeAll { $0.id == id }
+        snapshot.groupDetails?.removeValue(forKey: id)
+        snapshot.groupRosters?.removeValue(forKey: id)
+        rosterRequests[id] = nil
+        rosterWrites[id] = nil
+        saveCache()
+    }
+
     func invalidateAccount() {
         generation = UUID()
         account = nil
         snapshot = GroupCacheSnapshot()
+        rosterRequests.removeAll()
+        rosterWrites.removeAll()
         isStale = false
         isRefreshing = false
         isWorking = false

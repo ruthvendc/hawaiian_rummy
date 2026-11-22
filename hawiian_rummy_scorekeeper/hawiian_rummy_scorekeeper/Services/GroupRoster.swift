@@ -6,6 +6,7 @@ import Foundation
 enum GroupRosterError: LocalizedError, Equatable {
     case accessLost, notAuthorized, wrongGroup, invalidName, duplicateName
     case playerNotFound, stalePlayer, invalidRecord, reservationMismatch, reusedDraft, atomicUnavailable
+    case writeInProgress
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +21,7 @@ enum GroupRosterError: LocalizedError, Equatable {
         case .reservationMismatch: "A group player and its name reservation are inconsistent."
         case .reusedDraft: "This add request already belongs to a different player or name. Refresh the roster."
         case .atomicUnavailable: "CloudKit does not report atomic write support for this group’s zone."
+        case .writeInProgress: "A roster change is already being saved. Try again in a moment."
         }
     }
 }
@@ -35,12 +37,18 @@ struct GroupRosterAccess: Equatable {
         creatorKey = GroupRoster.digest("creator-v1:\(groupID.uuidString):\(account)")
     }
 
+    var canAdd: Bool { role != .reader }
+
+    func canRename(_ player: GroupPlayerIdentity) -> Bool {
+        role == .owner || (role == .editor && creatorKey == player.creatorKey)
+    }
+
     func requireAdd() throws {
-        guard role != .reader else { throw GroupRosterError.notAuthorized }
+        guard canAdd else { throw GroupRosterError.notAuthorized }
     }
 
     func requireRename(_ player: GroupPlayerIdentity) throws {
-        guard role == .owner || (role == .editor && creatorKey == player.creatorKey) else {
+        guard canRename(player) else {
             throw GroupRosterError.notAuthorized
         }
     }
@@ -48,6 +56,11 @@ struct GroupRosterAccess: Equatable {
     func requireOwner() throws {
         guard role == .owner else { throw GroupRosterError.notAuthorized }
     }
+}
+
+struct GroupRosterContents {
+    let access: GroupRosterAccess
+    let players: [GroupPlayerIdentity]
 }
 
 struct GroupRosterRecord {
@@ -90,7 +103,11 @@ struct GroupRoster {
     let verifyAccount: () async throws -> Void
 
     func players() async throws -> [GroupPlayerIdentity] {
-        _ = try await authorize()
+        try await contents().players
+    }
+
+    func contents() async throws -> GroupRosterContents {
+        let access = try await authorize()
         let records = try await store.records()
         var players: [GroupPlayerIdentity] = []
         var reservations: [CKRecord.ID: UUID] = [:]
@@ -109,10 +126,11 @@ struct GroupRoster {
         }
         guard reservations.isEmpty else { throw GroupRosterError.reservationMismatch }
         try await verifyAccount()
-        return players.sorted {
+        let sorted = players.sorted {
             let order = $0.displayName.localizedStandardCompare($1.displayName)
             return order == .orderedSame ? $0.id.uuidString < $1.id.uuidString : order == .orderedAscending
         }
+        return GroupRosterContents(access: access, players: sorted)
     }
 
     func add(_ draft: GroupPlayerDraft) async throws -> GroupPlayerIdentity {

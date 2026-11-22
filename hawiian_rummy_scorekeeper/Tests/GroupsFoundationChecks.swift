@@ -222,7 +222,100 @@ struct GroupsFoundationChecks {
         try check(detailsRelaunched.cachedDetails(for: owned) == nil && detailsRelaunched.snapshot.groupDetails == nil,
                   "Cached membership never crosses a verified account switch")
         try check(legacySnapshot.groupDetails == nil, "Existing cache snapshots decode without membership data")
+        try check(legacySnapshot.groupRosters == nil, "Existing cache snapshots decode without roster data")
+        try await rosterCacheChecks(directory: directory, group: owned, otherGroup: joined)
         print("Groups Foundation checks passed.")
+    }
+
+    private static func rosterCacheChecks(directory: URL, group: GroupSummary, otherGroup: GroupSummary) async throws {
+        let url = directory.appending(path: "roster-cache.store")
+        let model = GroupsModel(containerIdentifier: "unused-in-local-checks", cacheURL: url)
+        let account = "roster-account"
+        let id = UUID()
+        let access = GroupRosterAccess(role: .owner, groupID: group.id, account: account)
+        let initial = GroupPlayerIdentity(
+            id: id, groupID: group.id, creatorKey: access.creatorKey,
+            displayName: "Example Player", retiredAt: nil, changeTag: "1"
+        )
+        let retired = GroupPlayerIdentity(
+            id: id, groupID: group.id, creatorKey: access.creatorKey,
+            displayName: initial.displayName, retiredAt: .now, changeTag: "2"
+        )
+        let contents = GroupRosterContents(access: access, players: [initial])
+        let empty = GroupRosterContents(
+            access: GroupRosterAccess(role: .editor, groupID: otherGroup.id, account: account), players: []
+        )
+        await model.refresh(accountID: { account }, discover: { [group, otherGroup] })
+        let live = try await model.loadRoster(for: group) { verified in
+            try check(verified == account, "Roster reads are bound to the current account")
+            return contents
+        }
+        _ = try await model.loadRoster(for: otherGroup) { _ in empty }
+        try check(live.access == access && model.cachedRoster(for: group)?.players.map(\.id) == [id],
+                  "A live roster supplies permissions and populates the display cache")
+        try check(model.cachedRoster(for: otherGroup)?.players == [],
+                  "A loaded empty roster is distinct from an uncached group and stays group-scoped")
+        let wrongZone = GroupSummary(id: group.id, zoneOwner: "other-zone", name: group.name, isOwner: group.isOwner)
+        try check(model.cachedRoster(for: wrongZone) == nil, "A matching group UUID cannot read another zone’s cache")
+
+        let session = model.accountGeneration
+        try await model.changeRoster(in: group, session: session) { _ in retired }
+        try check(model.cachedRoster(for: group)?.players.first?.isRetired == true,
+                  "A confirmed write updates the cached row even before a fresh full load")
+        do {
+            _ = try await model.loadRoster(for: group) { _ in throw CKError(.unknownItem) }
+            throw Failure(message: "Expected a child read error")
+        } catch let error as CKError {
+            try check(error.code == .unknownItem && model.cachedRoster(for: group)?.players.first?.isRetired == true,
+                      "An ordinary missing child does not purge the saved roster")
+        }
+        let reopened = GroupsModel(containerIdentifier: "unused-in-local-checks", cacheURL: url)
+        await reopened.refresh(accountID: { account }, discover: { throw CKError(.networkUnavailable) })
+        try check(reopened.cachedRoster(for: group)?.players.first?.isRetired == true,
+                  "An identified account can reopen its saved roster during a connection failure")
+
+        do {
+            _ = try await model.loadRoster(for: group) { _ in
+                _ = try await model.loadRoster(for: group) { _ in
+                    GroupRosterContents(access: access, players: [retired])
+                }
+                throw GroupRosterError.accessLost
+            }
+            throw Failure(message: "Expected the older roster read to be superseded")
+        } catch is CancellationError {
+            try check(model.cachedRoster(for: group)?.players.first?.isRetired == true,
+                      "An older read failure cannot remove a fresher saved roster")
+        }
+
+        model.prepareForAccountRefresh()
+        do {
+            try await model.changeRoster(in: group, session: session) { _ in
+                throw Failure(message: "The old session must not reach the write")
+            }
+            throw Failure(message: "Expected the old roster editing session to be rejected")
+        } catch GroupRepositoryError.accountChanged {}
+        do {
+            _ = try await model.loadRoster(for: group) { _ in
+                await model.refresh(accountID: { "different-account" }, discover: { [group] })
+                return contents
+            }
+            throw Failure(message: "Expected a late read from the old account to be rejected")
+        } catch GroupRepositoryError.accountChanged {
+            try check(model.cachedRoster(for: group) == nil, "A late result cannot expose the previous account’s roster")
+        }
+
+        await model.refresh(accountID: { account }, discover: { [group] })
+        try check(model.cachedRoster(for: otherGroup) == nil && model.snapshot.groupRosters?[otherGroup.id] == nil,
+                  "Successful discovery removes saved rosters for groups that disappeared")
+        do {
+            _ = try await model.loadRoster(for: group) { _ in throw GroupRosterError.accessLost }
+            throw Failure(message: "Expected roster membership loss")
+        } catch GroupRosterError.accessLost {
+            let cache = try GroupCache(url: url)
+            let stored = try cache.load(account: account)
+            try check(model.cachedRoster(for: group) == nil && stored.groupRosters?[group.id] == nil &&
+                      !model.groups.contains(group), "Confirmed roster access loss purges the persisted roster and group")
+        }
     }
 
     private static func check(_ condition: Bool, _ message: String) throws {

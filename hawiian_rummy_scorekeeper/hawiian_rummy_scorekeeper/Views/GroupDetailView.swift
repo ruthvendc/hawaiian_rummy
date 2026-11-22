@@ -26,6 +26,13 @@ struct GroupDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Section {
+                NavigationLink {
+                    GroupPlayersView(group: group, model: model)
+                } label: {
+                    Label("Players", systemImage: "person.2.fill")
+                }
+            }
             if let details {
                 membersSection(details)
                 if group.isOwner { requestsSection(details) }
@@ -225,7 +232,7 @@ struct GroupDetailView: View {
             case .revoke(_, let name): "\(name) will lose access to this group."
             case .block(_, let name): "\(name) will no longer be able to request access to this group."
             case .removeGroup(let owner):
-                owner ? "This permanently deletes the shared group for everyone."
+                owner ? "This permanently deletes the shared group and its player roster for everyone."
                     : "You’ll need the owner’s approval to rejoin."
             }
         }
