@@ -14,6 +14,7 @@ struct PersonalPlayersChecks {
                                                cloudKitDatabase: .none)
         let store = try ModelContainer(for: schema, configurations: configuration)
         let context = store.mainContext
+        try checkPersonalScoring(schema)
 
         let original = try PersonalPlayers.add("  Wendy  ", in: context)
         let originalID = original.id
@@ -142,6 +143,38 @@ struct PersonalPlayersChecks {
             return
         }
         throw Failure(message: message)
+    }
+
+    @MainActor
+    private static func checkPersonalScoring(_ schema: Schema) throws {
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        let store = try ModelContainer(for: schema, configurations: configuration)
+        let context = store.mainContext
+        let first = PlayerProfile(name: "Zoe")
+        let second = PlayerProfile(name: "Alex")
+        let game = Game(title: "Personal scoring", players: [first, second])
+        context.insert(game)
+        let round = GameRules.createRound(in: game)
+        try check(round.orderedParticipants.map(\.displayName) == ["Zoe", "Alex"], "Personal score entry keeps seating order")
+        let firstID = try require(round.orderedParticipants.first?.id, "Expected first participant")
+        let secondID = try require(round.orderedParticipants.last?.id, "Expected second participant")
+        let ids = [firstID, secondID]
+        try check(GameRules.parsedScores(for: ids, values: [firstID: "2", secondID: "-1"]) == nil,
+                  "Personal entry still rejects negative scores")
+        let scores = try require(GameRules.parsedScores(for: ids, values: [firstID: "2", secondID: "2"]), "Expected valid scores")
+        for level in LevelDefinition.all {
+            try GameRules.save(scores: scores, for: level.number, in: round, context: context)
+        }
+        try check(round.isComplete && GameRules.standings(for: round).map(\.rank) == [1, 1],
+                  "Seven hands complete the round and tied players share first place")
+        let next = GameRules.createRound(in: game)
+        try check(GameRules.standings(for: next).map(\.total) == [0, 0], "The next personal round starts at zero")
+        game.completedAt = .now
+        try GameRules.save(scores: [firstID: 0, secondID: 2], for: 1, in: round, context: context)
+        let standings = GameRules.gameStandings(for: game)
+        try check(standings.map { $0.0.id } == [first.id, second.id] &&
+                  standings.map { $0.1 } == [12, 14] && standings.map { $0.2 } == [1, 2],
+                  "Correcting a completed Personal Game still replaces scores and ranks the lower total first")
     }
 
     private static func check(_ result: Bool, _ message: String) throws {

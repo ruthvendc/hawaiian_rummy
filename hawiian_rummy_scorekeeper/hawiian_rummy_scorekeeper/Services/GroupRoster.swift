@@ -31,10 +31,20 @@ struct GroupRosterAccess: Equatable {
 
     let role: Role
     let creatorKey: String
+    let scorekeeperParticipantKey: String?
 
-    init(role: Role, groupID: UUID, account: String) {
+    init(role: Role, groupID: UUID, account: String, participantID: String? = nil) {
         self.role = role
         creatorKey = GroupRoster.digest("creator-v1:\(groupID.uuidString):\(account)")
+        scorekeeperParticipantKey = participantID.map { Self.scorekeeperKey(groupID: groupID, participantID: $0) }
+    }
+
+    static func scorekeeperKey(groupID: UUID, participantID: String) -> String {
+        GroupRoster.digest("game-scorekeeper-v1:\(groupID.uuidString):\(participantID)")
+    }
+
+    func isScorekeeper(_ key: String) -> Bool {
+        creatorKey == key || scorekeeperParticipantKey == key
     }
 
     var canAdd: Bool { role != .reader }

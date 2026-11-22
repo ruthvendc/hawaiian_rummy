@@ -138,7 +138,7 @@ struct GameDetailView: View {
     }
 }
 
-private struct LevelMissionCard: View {
+struct LevelMissionCard: View {
     let roundNumber: Int
     let handNumber: Int
     let definition: LevelDefinition

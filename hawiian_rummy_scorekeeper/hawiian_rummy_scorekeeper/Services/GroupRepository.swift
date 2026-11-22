@@ -216,6 +216,18 @@ struct GroupRepository {
     }
 
     private func rosterAccess(for group: GroupSummary, account: String) async throws -> GroupRosterAccess {
+        try await verifiedMembership(for: group, account: account).access
+    }
+
+    func gameManagementShare(for group: GroupSummary, account: String) async throws -> CKShare {
+        let (share, access) = try await verifiedMembership(for: group, account: account)
+        try access.requireOwner()
+        return share
+    }
+
+    private func verifiedMembership(
+        for group: GroupSummary, account: String
+    ) async throws -> (share: CKShare, access: GroupRosterAccess) {
         try await verifyAccount(account)
         let root: CKRecord
         let fetchedShare: CKShare?
@@ -241,7 +253,8 @@ struct GroupRepository {
         guard isOwner == group.isOwner else { throw GroupRepositoryError.invalidGroup }
         // These roles govern app actions. A read/write participant has broader CloudKit permissions.
         let role: GroupRosterAccess.Role = isOwner ? .owner : participant.permission == .readWrite ? .editor : .reader
-        return GroupRosterAccess(role: role, groupID: group.id, account: account)
+        return (share, GroupRosterAccess(role: role, groupID: group.id, account: account,
+                                        participantID: participant.participantID))
     }
 
     func loadMemberDisplayNames(in details: GroupDetails, account: String) async -> GroupDetails {

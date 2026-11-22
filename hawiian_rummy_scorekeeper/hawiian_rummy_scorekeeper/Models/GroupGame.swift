@@ -27,6 +27,26 @@ struct GroupGameVersion: Codable, Equatable {
     let changeTag: String
 }
 
+enum GroupGameStatus {
+    case inProgress, completed, cancelled
+
+    var title: String {
+        switch self {
+        case .inProgress: "In progress"
+        case .completed: "Completed"
+        case .cancelled: "Cancelled"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .inProgress: "clock"
+        case .completed: "checkmark.circle"
+        case .cancelled: "xmark.circle"
+        }
+    }
+}
+
 struct GroupGameHeader: Equatable, Identifiable {
     let id: UUID
     let groupID: UUID
@@ -35,9 +55,21 @@ struct GroupGameHeader: Equatable, Identifiable {
     let scorekeeperKey: String
     let roundCount: Int
     let completedAt: Date?
+    let cancelledAt: Date?
     let createdAt: Date?
     let updatedAt: Date?
     let version: GroupGameVersion
+
+    var status: GroupGameStatus {
+        if cancelledAt != nil { return .cancelled }
+        if completedAt != nil { return .completed }
+        return .inProgress
+    }
+}
+
+struct GroupGameScorekeeperCandidate: Identifiable {
+    let id: String
+    let name: String
 }
 
 struct GroupGameRound: Equatable, Identifiable {
@@ -53,6 +85,14 @@ struct GroupGameRound: Equatable, Identifiable {
 struct GroupGameSnapshot: Equatable {
     let header: GroupGameHeader
     let rounds: [GroupGameRound]
+
+    func standings(round: GroupGameRound? = nil) -> [(player: GroupGameParticipant, total: Int128, rank: Int)] {
+        let hands = (round.map { [$0] } ?? rounds).flatMap(\.hands)
+        let scoresByPlayer = Dictionary(grouping: hands.flatMap(\.scores), by: \.playerID)
+        return GameRules.ranked(header.participants, name: \.displayName) {
+            GameRules.total((scoresByPlayer[$0.playerID] ?? []).map { Int128($0.points) })
+        }
+    }
 }
 
 struct GroupGameRoute: Hashable {
@@ -87,6 +127,16 @@ struct GroupGameOperation: Codable {
         case saveHand(round: Int, hand: GroupGameHand)
         case startNextRound
         case complete
+        case reassignScorekeeper(participantKey: String)
+        case cancel
+        case delete
+
+        var requiresOwner: Bool {
+            switch self {
+            case .reassignScorekeeper, .cancel, .delete: true
+            case .create, .saveHand, .startNextRound, .complete: false
+            }
+        }
     }
 
     let id: UUID

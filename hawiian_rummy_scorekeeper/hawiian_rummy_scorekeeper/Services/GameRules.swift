@@ -29,47 +29,56 @@ struct Standing: Identifiable {
 }
 
 enum GameRules {
+    static func parsedScores(for playerIDs: [UUID], values: [UUID: String]) -> [UUID: Int]? {
+        guard !playerIDs.isEmpty else { return nil }
+        var scores: [UUID: Int] = [:]
+        for id in playerIDs {
+            guard let value = values[id], let score = Int(value), score >= 0 else { return nil }
+            scores[id] = score
+        }
+        return scores
+    }
+
+    static func total<Points: AdditiveArithmetic>(_ scores: some Sequence<Points>) -> Points {
+        scores.reduce(.zero, +)
+    }
+
+    static func ranked<Player, Points: Comparable>(
+        _ players: [Player], name: (Player) -> String, score: (Player) -> Points
+    ) -> [(player: Player, total: Points, rank: Int)] {
+        let sorted = players.map { (player: $0, total: score($0)) }.sorted {
+            $0.total == $1.total ? name($0.player) < name($1.player) : $0.total < $1.total
+        }
+        var previous: Points?
+        var rank = 0
+        return sorted.enumerated().map { index, item in
+            if previous != item.total {
+                rank = index + 1
+                previous = item.total
+            }
+            return (item.player, item.total, rank)
+        }
+    }
+
     static func score(for participant: RoundParticipant, in round: GameRound) -> Int {
-        (round.levels ?? []).flatMap { $0.entries ?? [] }
-            .filter { $0.participant?.id == participant.id }
-            .reduce(0) { $0 + $1.score }
+        total((round.levels ?? []).flatMap { $0.entries ?? [] }
+            .filter { $0.participant?.id == participant.id }.map(\.score))
     }
 
     static func score(for player: PlayerProfile, in game: Game) -> Int {
-        (game.rounds ?? []).flatMap { $0.levels ?? [] }.flatMap { $0.entries ?? [] }
-            .filter { $0.participant?.player?.id == player.id }
-            .reduce(0) { $0 + $1.score }
+        total((game.rounds ?? []).flatMap { $0.levels ?? [] }.flatMap { $0.entries ?? [] }
+            .filter { $0.participant?.player?.id == player.id }.map(\.score))
     }
 
     static func standings(for round: GameRound) -> [Standing] {
-        let sorted = (round.participants ?? []).sorted {
-            let left = score(for: $0, in: round)
-            let right = score(for: $1, in: round)
-            return left == right ? $0.displayName < $1.displayName : left < right
-        }
-        var priorScore: Int?
-        var rank = 0
-        return sorted.enumerated().map { index, participant in
-            let total = score(for: participant, in: round)
-            if priorScore != total { rank = index + 1; priorScore = total }
-            return Standing(participant: participant, total: total, rank: rank, isLeader: rank == 1)
-        }
+        ranked(round.participants ?? [], name: \.displayName, score: { score(for: $0, in: round) })
+            .map { participant, total, rank in
+                Standing(participant: participant, total: total, rank: rank, isLeader: rank == 1)
+            }
     }
 
     static func gameStandings(for game: Game) -> [(PlayerProfile, Int, Int)] {
-        var ordered: [(player: PlayerProfile, total: Int)] = []
-        for player in game.players ?? [] {
-            ordered.append((player: player, total: score(for: player, in: game)))
-        }
-        ordered.sort { left, right in
-            left.total == right.total ? left.player.name < right.player.name : left.total < right.total
-        }
-        var previous: Int?
-        var rank = 0
-        return ordered.enumerated().map { index, item in
-            if previous != item.total { rank = index + 1; previous = item.total }
-            return (item.player, item.total, rank)
-        }
+        ranked(game.players ?? [], name: \.name, score: { score(for: $0, in: game) })
     }
 
     static func createRound(in game: Game) -> GameRound {

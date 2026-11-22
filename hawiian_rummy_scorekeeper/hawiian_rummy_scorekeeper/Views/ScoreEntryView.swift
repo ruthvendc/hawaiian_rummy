@@ -12,13 +12,7 @@ struct ScoreEntryView: View {
     private var definition: LevelDefinition { LevelDefinition.definition(for: levelNumber) }
     private var isEditingExistingLevel: Bool { (round.levels ?? []).contains { $0.levelNumber == levelNumber } }
     private var parsedScores: [UUID: Int]? {
-        guard let participants = round.participants, !participants.isEmpty else { return nil }
-        var result: [UUID: Int] = [:]
-        for participant in participants {
-            guard let value = values[participant.id], let score = Int(value), score >= 0 else { return nil }
-            result[participant.id] = score
-        }
-        return result
+        GameRules.parsedScores(for: round.orderedParticipants.map(\.id), values: values)
     }
 
     var body: some View {
@@ -29,13 +23,7 @@ struct ScoreEntryView: View {
                 }
                 Section("Scores") {
                     ForEach(round.orderedParticipants) { participant in
-                        HStack {
-                            Text(participant.displayName)
-                            TextField("Score", text: scoreBinding(for: participant))
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                                .accessibilityLabel("Score for \(participant.displayName)")
-                        }
+                        PlayerScoreField(name: participant.displayName, score: scoreBinding(for: participant))
                     }
                 }
             }
@@ -79,6 +67,21 @@ struct ScoreEntryView: View {
         } catch {
             context.rollback()
             showingSaveError = true
+        }
+    }
+}
+
+struct PlayerScoreField: View {
+    let name: String
+    @Binding var score: String
+
+    var body: some View {
+        HStack {
+            Text(name)
+            TextField("Score", text: $score)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .accessibilityLabel("Score for \(name)")
         }
     }
 }

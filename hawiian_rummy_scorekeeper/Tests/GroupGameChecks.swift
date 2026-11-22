@@ -5,6 +5,11 @@ import Foundation
 struct GroupGameChecks {
     static func main() async throws {
         try await identityAndLifecycle()
+        try await scoringSession()
+        try await scoringProgression()
+        try await ownerReassignment()
+        try await ownerCancellation()
+        try await ownerDeletion()
         try await staleAndFailedWrites()
         try await lostAcknowledgmentsAndAccess()
         try await retryVerificationPreflight()
@@ -59,12 +64,107 @@ struct GroupGameChecks {
             _ = try await member.perform(change(snapshot, .saveHand(round: 1, hand: hand)))
             snapshot = try await member.load(create.gameID)
         }
-        _ = try await member.perform(change(snapshot, .startNextRound))
+        let advance = change(snapshot, .startNextRound)
+        let advanced = try await member.perform(advance)
+        try check(try await member.perform(advance) == advanced, "Retrying advancement returns its original receipt")
+        try await expect(GroupGameError.staleGame, "A second advancement from the same revision cannot add a round") {
+            _ = try await member.perform(change(snapshot, .startNextRound))
+        }
         let next = try await owner.load(create.gameID)
         try check(next.rounds.map(\.id) == [.init(gameID: create.gameID, number: 1), .init(gameID: create.gameID, number: 2)] &&
                   next.rounds.first?.hands.count == LevelDefinition.all.count && next.rounds.last?.hands == [],
                   "Starting another round preserves prior scores and attaches exactly one new round")
         try check(next.header.participants == original.header.participants, "Retired participants can continue their existing game")
+        let corrected = scored(1, points: 7, next)
+        _ = try await member.perform(change(next, .saveHand(round: 1, hand: corrected)))
+        let reviewed = try await owner.load(create.gameID)
+        try check(reviewed.rounds.first?.hands.first == corrected && reviewed.rounds.last?.hands.isEmpty == true &&
+                  reviewed.standings().map(\.total) == [25, 25] && reviewed.standings().map(\.rank) == [1, 1],
+                  "A prior round can be corrected and tied players retain a shared first place")
+    }
+
+    private static func scoringSession() async throws {
+        let fixture = Fixture()
+        let member = fixture.games(.editor, account: "member")
+        let owner = fixture.games(.owner, account: "owner")
+        let create = fixture.creation()
+        _ = try await member.perform(create)
+        var submitted: [GroupGameOperation] = []
+        var loseResponse = false
+        var failLoad = false
+        var revoked = false
+        let access = try await member.authorize()
+        let scoring = GroupGameScoring(hasGroup: { true }, load: {
+            if failLoad { throw CKError(.networkUnavailable) }
+            let game = try await member.load(create.gameID)
+            return .init(game: game, access: access, scorekeeperName: "You")
+        }, perform: { operation in
+            submitted.append(operation)
+            let authorized = fixture.games {
+                if revoked { throw GroupRosterError.accessLost }
+                return access
+            }
+            let receipt = try await authorized.perform(operation)
+            if loseResponse { throw CKError(.networkFailure) }
+            return receipt
+        })
+        scoring.online = true
+        await scoring.refresh()
+        guard let original = scoring.detail?.game else { throw Failure("No initial scoring snapshot") }
+        let observer = GroupGameScoring.Detail(
+            game: try await owner.load(create.gameID), access: try await owner.authorize(), scorekeeperName: "Member"
+        )
+        try check(scoring.canScore && scoring.managementHeader == nil && !observer.canScore,
+                  "A member scorekeeper can edit scores and cannot see owner controls")
+        scoring.beginScores(round: 1, hand: 1)
+        let first = fixture.playerIDs[0], second = fixture.playerIDs[1]
+        scoring.updateScore(for: first, value: "9")
+        scoring.updateScore(for: second, value: "-1")
+        try check(!scoring.canSaveDraft, "Every participant needs a non-negative score")
+        scoring.updateScore(for: second, value: "10")
+        scoring.online = false
+        await scoring.saveDraft()
+        try check(submitted.isEmpty && scoring.draft?.values[first] == "9", "Offline score entry stays in the form")
+        scoring.online = true
+        await scoring.refresh()
+
+        let competingHand = scored(1, points: 3, original)
+        _ = try await member.perform(change(original, .saveHand(round: 1, hand: competingHand)))
+        await scoring.saveDraft()
+        try check(scoring.pending == nil && scoring.draftNeedsReview && !scoring.canSaveDraft &&
+                  scoring.draft?.values[first] == "9" && scoring.savedDraftHand == competingHand,
+                  "Stale-write rejection loads the newer score and retains the entered score for review")
+        await scoring.saveDraft()
+        try check(submitted.count == 1, "A newer version requires explicit review")
+        scoring.reviewDraft()
+        loseResponse = true
+        await scoring.saveDraft()
+        guard let pending = scoring.pending else { throw Failure("The unconfirmed operation was lost") }
+        try check(scoring.canRetry && !scoring.canSaveDraft && pending.id != submitted[0].id &&
+                  pending.expectedVersion != submitted[0].expectedVersion,
+                  "A deliberate resubmission uses a fresh ID and the reviewed version")
+        scoring.updateScore(for: first, value: "99")
+        try check(scoring.draft?.values[first] == "9", "An ambiguous write retains its original score entries")
+        loseResponse = false
+        failLoad = true
+        await scoring.retry()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        try check(try encoder.encode(submitted.last) == encoder.encode(pending) && fixture.transport.commits == 3 &&
+                  scoring.pending == nil && scoring.draft == nil && scoring.awaitingReadback && !scoring.canScore,
+                  "Retry replays the exact operation and a failed readback is distinguished from a failed write")
+        failLoad = false
+        await scoring.refresh()
+        try check(scoring.detail?.game.standings().map(\.total) == [9, 10] && scoring.canScore &&
+                  !scoring.awaitingReadback, "A successful refresh displays the acknowledged scores")
+
+        scoring.beginScores(round: 1, hand: 2)
+        scoring.updateScore(for: first, value: "6")
+        scoring.updateScore(for: second, value: "0")
+        revoked = true
+        await scoring.saveDraft()
+        try check(!scoring.canView && scoring.detail == nil && scoring.pending == nil &&
+                  fixture.transport.commits == 3, "Live revocation removes the opened game and prevents submission")
     }
 
     private static func staleAndFailedWrites() async throws {
@@ -77,7 +177,10 @@ struct GroupGameChecks {
             _ = try await games.perform(create)
             throw Failure("Expected atomic create to fail")
         } catch let error as CKError where error.code == .permissionFailure {
-            try check(transport.records.isEmpty, "Failed create leaves no header, round or receipt")
+            try check(transport.records[games.gameID(create.gameID)] == nil &&
+                      transport.records[games.roundID(game: create.gameID, number: 1)] == nil &&
+                      transport.records[games.receiptID(for: create)] == nil,
+                      "Failed create leaves no header, round or receipt")
         }
         _ = try await games.perform(create)
         let initial = try await games.load(create.gameID)
@@ -137,19 +240,30 @@ struct GroupGameChecks {
         let completed = try await member.perform(change(latest, .complete))
         let final = try await member.load(create.gameID)
         let corrected = scored(1, points: 23, final)
-        _ = try await member.perform(change(final, .saveHand(round: 1, hand: corrected)))
-        let reviewed = try await member.load(create.gameID)
-        try check(reviewed.header.completedAt == final.header.completedAt &&
-                  reviewed.header.version.revision == completed.revision + 1 && reviewed.rounds.first?.hands == [corrected],
-                  "A scorekeeper can correct a recorded hand without reopening the game")
+        try check(completed.revision == 4 && final.header.completedAt != nil &&
+                  final.rounds.first?.hands == [newer], "Completion preserves saved scores from a partial round")
+        for action in [GroupGameOperation.Action.saveHand(round: 1, hand: corrected), .startNextRound, .complete] {
+            let mutation = change(final, action)
+            try await expect(GroupGameError.invalidTransition, "Completed games reject all new mutations") {
+                _ = try await member.perform(mutation)
+            }
+            try check(transport.records[member.receiptID(for: mutation)] == nil, "Rejected mutations leave no receipt")
+        }
+        let replayed = try await member.perform(original)
+        let reloaded = try await member.load(create.gameID)
+        try check(replayed == recovered && reloaded == final,
+                  "Recovery can acknowledge an old receipt after completion without changing the game")
 
         var verifications = 0
+        let editable = fixture.creation()
+        _ = try await member.perform(editable)
+        let editableGame = try await member.load(editable.gameID)
         let revoked = fixture.games(authorize: {
             verifications += 1
             guard verifications == 1 else { throw GroupRosterError.accessLost }
             return GroupRosterAccess(role: .editor, groupID: fixture.id, account: "member")
         })
-        let pending = change(reviewed, .saveHand(round: 1, hand: newer))
+        let pending = change(editableGame, .saveHand(round: 1, hand: newer))
         try await expect(GroupRosterError.accessLost, "Revocation between preparation and save stops the request") {
             _ = try await revoked.perform(pending)
         }
@@ -169,28 +283,25 @@ struct GroupGameChecks {
 
     private static func retryVerificationPreflight() async throws {
         let fixture = Fixture()
-        guard let memberGame = UUID(uuidString: "3B010000-0000-4000-8000-000000000002") else {
+        guard let ownerGame = UUID(uuidString: "3B010000-0000-4000-8000-000000000001"),
+              let memberGame = UUID(uuidString: "3B010000-0000-4000-8000-000000000002") else {
             throw Failure("Invalid verification game UUID")
         }
         let member = fixture.games(.editor, account: "member")
         let owner = fixture.games(.owner, account: "owner")
-        let ownerGame = fixture.creation()
-        _ = try await owner.perform(ownerGame)
+        _ = try await owner.perform(.create(groupID: fixture.id, gameID: ownerGame, playerIDs: fixture.playerIDs))
         _ = try await member.perform(.create(groupID: fixture.id, gameID: memberGame, playerIDs: fixture.playerIDs))
-        let initial = try await member.load(memberGame)
-        _ = try await member.perform(change(initial, .saveHand(round: 1, hand: scored(1, points: 3, initial))))
-
-        let beforeRollback = fixture.transport.commits
+        let beforeWrite = fixture.transport.commits
         let early = try await GroupGameVerification.run("retry-status", games: member, isOwner: false)
-        try check(early.hasPrefix("BLOCKED") && early.contains("revision 2") && fixture.transport.commits == beforeRollback,
+        try check(early.hasPrefix("BLOCKED") && early.contains("revision 1") && fixture.transport.commits == beforeWrite,
                   "Wrong revision is reported without a write")
-        _ = try await GroupGameVerification.run("rollback", games: member, isOwner: false)
+        _ = try await GroupGameVerification.run("write", games: member, isOwner: false)
         let reopened = fixture.games(.editor, account: "member")
-        let afterRollback = fixture.transport.commits
+        let afterWrite = fixture.transport.commits
         let ready = try await GroupGameVerification.run("retry-status", games: reopened, isOwner: false)
-        try check(ready.hasPrefix("READY") && ready.contains("verified/missing/missing/missing") &&
-                  fixture.transport.commits == afterRollback,
-                  "A new store instance recognizes the persisted rollback without a write")
+        try check(ready.hasPrefix("READY") && ready.contains("verified/missing/missing") &&
+                  fixture.transport.commits == afterWrite,
+                  "A new store instance recognizes the first saved hand without a write")
         let differentMember = fixture.games(.editor, account: "other")
         let wrongActor = try await GroupGameVerification.run("retry-status", games: differentMember, isOwner: false)
         try check(wrongActor.hasPrefix("BLOCKED") && wrongActor.contains("Scorekeeper matches: no"),
@@ -199,8 +310,8 @@ struct GroupGameChecks {
         _ = try await GroupGameVerification.run("retry", games: reopened, isOwner: false)
         let afterRetry = fixture.transport.commits
         let advanced = try await GroupGameVerification.run("retry-status", games: reopened, isOwner: false)
-        try check(advanced.hasPrefix("BLOCKED") && advanced.contains("revision 5") &&
-                  advanced.contains("verified/missing/verified/verified") && afterRetry == afterRollback + 2,
+        try check(advanced.hasPrefix("BLOCKED") && advanced.contains("revision 4") &&
+                  advanced.contains("verified/verified/verified") && afterRetry == afterWrite + 2,
                   "The read-only status reports both retry receipts once Test 6 has written")
         do {
             _ = try await GroupGameVerification.run("retry", games: reopened, isOwner: false)
@@ -208,6 +319,242 @@ struct GroupGameChecks {
         } catch {
             try check(error.localizedDescription.contains("BLOCKED for retry") && fixture.transport.commits == afterRetry,
                       "An advanced game rejects a repeated retry probe before writing")
+        }
+        _ = try await GroupGameVerification.run("rollback", games: member, isOwner: false)
+        let final = try await owner.load(memberGame)
+        try check(final.header.version.revision == 5 && final.header.completedAt != nil &&
+                  final.rounds.first?.hands == [scored(1, points: 21, final)] && fixture.transport.commits == afterRetry + 1,
+                  "The revised rollback probe completes the game and retains the recovered scores")
+    }
+
+    private static func scoringProgression() async throws {
+        let fixture = Fixture()
+        let games = fixture.games(.owner, account: "owner")
+        let create = fixture.creation()
+        _ = try await games.perform(create)
+        let scoring = GroupGameScoring(hasGroup: { true }, load: {
+            let (game, access) = try await games.loadWithAccess(create.gameID)
+            return .init(game: game, access: access, scorekeeperName: "You")
+        }, perform: games.perform)
+        scoring.online = true
+        await scoring.refresh()
+        guard let initial = scoring.detail?.game.header.version else { throw Failure("No initial revision") }
+        await scoring.advance(from: initial)
+        try check(fixture.transport.commits == 1, "Advancement is unavailable before all seven hands are saved")
+        for level in LevelDefinition.all {
+            scoring.beginScores(round: 1, hand: level.number)
+            for id in fixture.playerIDs { scoring.updateScore(for: id, value: "3") }
+            await scoring.saveDraft()
+        }
+        guard let version = scoring.detail?.game.header.version else { throw Failure("No scored revision") }
+        await scoring.advance(from: version)
+        await scoring.advance(from: version)
+        try check(scoring.detail?.game.rounds.map(\.hands.count) == [7, 0] && fixture.transport.commits == 9,
+                  "The freshly loaded second round blocks a duplicate advancement")
+        await scoring.complete(from: version)
+        try check(scoring.detail?.game.header.completedAt == nil && fixture.transport.commits == 9,
+                  "A completion confirmation uses the version the scorekeeper reviewed")
+        guard let current = scoring.detail?.game.header.version else { throw Failure("No advanced revision") }
+        await scoring.complete(from: current)
+        try check(scoring.detail?.game.header.completedAt != nil && !scoring.canScore && fixture.transport.commits == 10,
+                  "A successful completion reloads the final scores and disables editing")
+    }
+
+    private static func ownerReassignment() async throws {
+        let fixture = Fixture()
+        let owner = fixture.games(.owner, account: "owner", participantID: "owner-participant")
+        let member = fixture.games(.editor, account: "member", participantID: "member-participant")
+        let other = fixture.games(.editor, account: "account-not-visible-to-owner", participantID: "other-participant")
+        let create = fixture.creation()
+        _ = try await member.perform(create)
+        let initial = try await member.load(create.gameID)
+        let firstHand = scored(1, points: 7, initial)
+        _ = try await member.perform(change(initial, .saveHand(round: 1, hand: firstHand)))
+        let before = try await owner.load(create.gameID)
+        let ownerKey = fixture.scorekeeperKey("owner-participant")
+        let memberKey = fixture.scorekeeperKey("member-participant")
+        let otherKey = fixture.scorekeeperKey("other-participant")
+        func openAsOwner(scorekeeperName: String?) async -> GroupGameScoring {
+            let scoring = GroupGameScoring(hasGroup: { true }, load: {
+                let (game, access) = try await owner.loadWithAccess(create.gameID)
+                let name = access.isScorekeeper(game.header.scorekeeperKey) ? "You" : scorekeeperName
+                return .init(game: game, access: access, scorekeeperName: name)
+            }, perform: owner.perform)
+            scoring.online = true
+            await scoring.refresh()
+            return scoring
+        }
+        let active = await openAsOwner(scorekeeperName: "Member")
+        try check(active.managementHeader == before.header && active.canManage && !active.canScore,
+                  "The owner's Manage Game row is available while an active member keeps score")
+        let reassign = change(before, .reassignScorekeeper(participantKey: ownerKey))
+        try await expect(GroupRosterError.notAuthorized, "A member cannot reassign even their own game") {
+            _ = try await member.perform(reassign)
+        }
+        try await expect(GroupGameError.notScorekeeper, "The owner has no implicit scoring access") {
+            _ = try await owner.perform(change(before, .saveHand(round: 1, hand: firstHand)))
+        }
+        fixture.setEligibleParticipants(["owner-participant", "other-participant"], version: "revoked")
+        let scoring = await openAsOwner(scorekeeperName: nil)
+        guard let abandoned = scoring.managementHeader else {
+            throw Failure("Manage Game must be visible when the owner opens an abandoned game")
+        }
+        try check(abandoned.version == before.header.version && scoring.detail?.scorekeeperName == nil &&
+                  scoring.canManage && !scoring.canScore,
+                  "The revoked scorekeeper's missing name leaves owner management available and scores read-only")
+        try await expect(GroupGameError.scorekeeperUnavailable, "The owner cannot assign a revoked participant") {
+            _ = try await owner.perform(change(before, .reassignScorekeeper(participantKey: memberKey)))
+        }
+        await scoring.reassignScorekeeper(ownerKey, from: abandoned.version)
+        let recovered = try await owner.load(create.gameID)
+        try check(recovered.header.scorekeeperKey == ownerKey && recovered.header.creatorKey == before.header.creatorKey &&
+                  recovered.header.participants == before.header.participants && recovered.rounds == before.rounds &&
+                  scoring.detail?.game == recovered && scoring.canScore,
+                  "Reassigning from Manage Game preserves history and enables scoring after reloading")
+        let secondHand = scored(2, points: 5, recovered)
+        _ = try await owner.perform(change(recovered, .saveHand(round: 1, hand: secondHand)))
+        let continued = try await owner.load(create.gameID)
+        let newAssignment = change(continued, .reassignScorekeeper(participantKey: otherKey))
+
+        fixture.transport.beforeSave = {
+            fixture.setEligibleParticipants(["owner-participant"], version: "revoked-during-reassignment")
+        }
+        try await expect(GroupGameError.staleGame, "Revocation after validation invalidates the share change tag") {
+            _ = try await owner.perform(newAssignment)
+        }
+        try check(try await owner.load(create.gameID) == continued &&
+                  fixture.transport.records[owner.receiptID(for: newAssignment)] == nil,
+                  "A race against revocation changes neither the game nor its receipts")
+        try await expect(GroupGameError.scorekeeperUnavailable, "Retry revalidates the target’s live eligibility") {
+            _ = try await owner.perform(newAssignment)
+        }
+        fixture.setEligibleParticipants(["owner-participant", "other-participant"], version: "approved-again")
+        let lateScore = change(continued, .saveHand(round: 1, hand: scored(3, points: 11, continued)))
+        fixture.transport.beforeSave = { _ = try await owner.perform(newAssignment) }
+        try await expect(GroupGameError.staleGame, "Reassignment wins against a prepared prior-scorekeeper write") {
+            _ = try await owner.perform(lateScore)
+        }
+        let reassigned = try await other.load(create.gameID)
+        try check(reassigned.header.scorekeeperKey == otherKey && reassigned.rounds == continued.rounds &&
+                  fixture.transport.records[owner.receiptID(for: lateScore)] == nil,
+                  "Reassign while an existing scorekeeper is active and leave that scorekeeper’s pending write unapplied")
+        try await expect(GroupGameError.notScorekeeper, "Former scorekeeper loses scoring permissions even at the latest revision") {
+            _ = try await owner.perform(change(reassigned, .saveHand(round: 1, hand: secondHand)))
+        }
+        let thirdHand = scored(3, points: 9, reassigned)
+        _ = try await other.perform(change(reassigned, .saveHand(round: 1, hand: thirdHand)))
+        let latest = try await owner.load(create.gameID)
+        try check(latest.rounds.first?.hands == [firstHand, secondHand, thirdHand],
+                  "The approved recipient can continue using the share participant ID despite account aliases")
+    }
+
+    private static func ownerCancellation() async throws {
+        let fixture = Fixture()
+        let owner = fixture.games(.owner, account: "owner")
+        let member = fixture.games(.editor, account: "member")
+        let create = fixture.creation()
+        _ = try await member.perform(create)
+        let original = try await member.load(create.gameID)
+        let hand = scored(1, points: 4, original)
+        _ = try await member.perform(change(original, .saveHand(round: 1, hand: hand)))
+        let before = try await member.load(create.gameID)
+        let cancel = change(before, .cancel)
+        try await expect(GroupRosterError.notAuthorized, "A scorekeeper without ownership cannot cancel") {
+            _ = try await member.perform(cancel)
+        }
+        let pendingScore = change(before, .saveHand(round: 1, hand: scored(2, points: 9, before)))
+        fixture.transport.beforeSave = { _ = try await owner.perform(cancel) }
+        try await expect(GroupGameError.staleGame, "Cancellation atomically invalidates a prepared scoring write") {
+            _ = try await member.perform(pendingScore)
+        }
+        let cancelled = try await member.load(create.gameID)
+        try check(cancelled.header.status == .cancelled && cancelled.header.completedAt == nil &&
+                  cancelled.rounds == before.rounds && cancelled.header.participants == before.header.participants,
+                  "Cancellation is a distinct status and preserves saved scores and snapshots")
+        let acknowledged = try await owner.perform(cancel)
+        try check(acknowledged.revision == cancelled.header.version.revision && fixture.transport.commits == 3,
+                  "Cancellation retry reuses its receipt")
+        for action in [GroupGameOperation.Action.saveHand(round: 1, hand: hand), .startNextRound, .complete] {
+            try await expect(GroupGameError.invalidTransition, "A cancelled game rejects scoring and progression") {
+                _ = try await member.perform(change(cancelled, action))
+            }
+        }
+        try await expect(GroupGameError.invalidTransition, "A cancelled game cannot be reassigned") {
+            _ = try await owner.perform(change(cancelled, .reassignScorekeeper(participantKey: fixture.scorekeeperKey("owner-participant"))))
+        }
+        let finished = fixture.creation()
+        _ = try await owner.perform(finished)
+        let active = try await owner.load(finished.gameID)
+        _ = try await owner.perform(change(active, .complete))
+        let completed = try await owner.load(finished.gameID)
+        for action in [GroupGameOperation.Action.cancel, .reassignScorekeeper(participantKey: fixture.scorekeeperKey("other-participant"))] {
+            try await expect(GroupGameError.invalidTransition, "Completed games cannot be cancelled or reassigned") {
+                _ = try await owner.perform(change(completed, action))
+            }
+        }
+        _ = try await owner.perform(change(completed, .delete))
+        _ = try await owner.perform(change(cancelled, .delete))
+        let headers = fixture.transport.records.values.filter { GroupGameStore.gameUUID($0.record.recordID) != nil }
+        try check(try await owner.list { Array(headers) }.isEmpty, "The owner can permanently delete completed and cancelled games")
+    }
+
+    private static func ownerDeletion() async throws {
+        let fixture = Fixture()
+        let owner = fixture.games(.owner, account: "owner")
+        let member = fixture.games(.editor, account: "member")
+        let create = fixture.creation()
+        _ = try await member.perform(create)
+        let unrelated = fixture.creation()
+        _ = try await owner.perform(unrelated)
+        let untouched = try await owner.load(unrelated.gameID)
+        let before = try await member.load(create.gameID)
+        let score = change(before, .saveHand(round: 1, hand: scored(1, points: 3, before)))
+        fixture.transport.beforeSave = { _ = try await member.perform(score) }
+        try await expect(GroupGameError.staleGame, "A stale deletion cannot remove a newly scored game") {
+            _ = try await owner.perform(change(before, .delete))
+        }
+        let current = try await member.load(create.gameID)
+        let delete = change(current, .delete)
+        try await expect(GroupRosterError.notAuthorized, "A member cannot delete even their own game") {
+            _ = try await member.perform(delete)
+        }
+        fixture.transport.beforeSave = { throw CKError(.limitExceeded) }
+        try await expect(GroupGameError.deletionTooLarge, "CloudKit batch limits fail without partially deleting the game") {
+            _ = try await owner.perform(delete)
+        }
+        try check(try await member.load(create.gameID) == current &&
+                  fixture.transport.records[owner.receiptID(for: delete)] == nil,
+                  "A rejected delete preserves the header, scores, and previous receipts")
+
+        let lateScore = change(current, .saveHand(round: 1, hand: scored(2, points: 6, current)))
+        fixture.transport.beforeSave = {
+            fixture.transport.afterSave = { throw GroupAtomicWriteError.unconfirmed(CKError(.networkFailure)) }
+            _ = try await owner.perform(delete)
+        }
+        try await expect(GroupGameError.staleGame, "Deletion invalidates a pending write before its atomic commit") {
+            _ = try await member.perform(lateScore)
+        }
+        let recovered = try await owner.perform(delete)
+        let ids = try await fixture.transport.gameChildren(of: owner.gameID(create.gameID)).map(\.record.recordID)
+        try check(recovered.revision == current.header.version.revision + 1 &&
+                  ids == [owner.receiptID(for: delete)] && fixture.transport.commits == 4,
+                  "An ambiguous deletion keeps one receipt and deletes all previous rounds and receipts atomically")
+        let tombstone = fixture.transport.records[owner.gameID(create.gameID)]?.record
+        try check(tombstone?["deletedAt"] is Date && tombstone?["participants"] == nil &&
+                  tombstone?["scorekeeperKey"] == nil, "The durable marker contains no players or scorekeeper identity")
+        let headers = fixture.transport.records.values.filter { GroupGameStore.gameUUID($0.record.recordID) != nil }
+        try check(try await member.list { Array(headers) } == [untouched.header], "Fresh history omits deleted games")
+        try check(try await owner.load(unrelated.gameID) == untouched, "Deletion leaves other games alone")
+        try await expect(GroupGameError.gameDeleted, "The old game route cannot reopen the game") {
+            _ = try await member.load(create.gameID)
+        }
+        for operation in [create, score, lateScore] {
+            try await expect(GroupGameError.gameDeleted, "A stale device cannot recreate or modify the deleted game") {
+                _ = try await member.perform(operation)
+            }
+        }
+        try await expect(GroupGameError.gameDeleted, "A different delete operation cannot delete the tombstone") {
+            _ = try await owner.perform(change(current, .delete))
         }
     }
 
@@ -291,6 +638,13 @@ struct GroupGameChecks {
         let playerIDs = [UUID(), UUID()]
         let transport = MemoryStore()
         var players: [GroupPlayerIdentity] = []
+        private var shareID: CKRecord.ID {
+            CKRecord.ID(recordName: "test-share", zoneID: zone)
+        }
+        private var zone: CKRecordZone.ID {
+            CKRecordZone.ID(zoneName: "RummyGroup-\(id.uuidString)", ownerName: "owner")
+        }
+        private var eligibleParticipantIDs = ["owner-participant", "member-participant", "other-participant"]
 
         init() {
             let key = GroupRosterAccess(role: .owner, groupID: id, account: "owner").creatorKey
@@ -298,27 +652,47 @@ struct GroupGameChecks {
                 GroupPlayerIdentity(id: $0.element, groupID: id, creatorKey: key,
                                     displayName: "Player \($0.offset)", retiredAt: nil, changeTag: "player")
             }
+            setEligibleParticipants(eligibleParticipantIDs, version: "share-1")
+        }
+
+        func setEligibleParticipants(_ ids: [String], version: String) {
+            eligibleParticipantIDs = ids
+            let share = CKRecord(recordType: "TestShare", recordID: shareID)
+            transport.records[shareID] = GroupStoredRecord(share, changeTag: version)
+        }
+
+        func scorekeeperKey(_ participantID: String) -> String {
+            GroupRosterAccess.scorekeeperKey(groupID: id, participantID: participantID)
         }
 
         func creation() -> GroupGameOperation {
             GroupGameOperation.create(groupID: id, gameID: UUID(), playerIDs: playerIDs)
         }
 
-        func games(_ role: GroupRosterAccess.Role, account: String) -> GroupGameStore {
-            games(authorize: { GroupRosterAccess(role: role, groupID: self.id, account: account) })
+        func games(_ role: GroupRosterAccess.Role, account: String, participantID: String? = nil) -> GroupGameStore {
+            games(authorize: {
+                GroupRosterAccess(role: role, groupID: self.id, account: account, participantID: participantID)
+            })
         }
 
         func games(
             authorize: @escaping () async throws -> GroupRosterAccess,
             verifyAccount: @escaping () async throws -> Void = {}
         ) -> GroupGameStore {
-            let zone = CKRecordZone.ID(zoneName: "RummyGroup-\(id.uuidString)", ownerName: "owner")
             return GroupGameStore(groupID: id, root: CKRecord.ID(recordName: "group", zoneID: zone), store: transport,
-                                  authorize: authorize, verifyAccount: verifyAccount, loadPlayers: { self.players })
+                                  authorize: authorize, verifyAccount: verifyAccount, loadPlayers: { self.players },
+                                  loadOwnerAuthority: {
+                guard let share = try await self.transport.record(for: self.shareID) else {
+                    throw Failure("Missing mock share")
+                }
+                return GroupGameOwnerAuthority(share: share, eligibleKeys: Set(self.eligibleParticipantIDs.map {
+                    self.scorekeeperKey($0)
+                }))
+            })
         }
     }
 
-    private final class MemoryStore: GroupRecordStore {
+    private final class MemoryStore: GroupGameRecordStore {
         var records: [CKRecord.ID: GroupStoredRecord] = [:]
         var beforeSave: (() async throws -> Void)?
         var afterSave: (() async throws -> Void)?
@@ -328,11 +702,28 @@ struct GroupGameChecks {
             try records[id].map { try copy($0, tag: $0.changeTag) }
         }
 
+        func gameChildren(of game: CKRecord.ID) async throws -> [GroupStoredRecord] {
+            try records.values.filter { $0.record.parent?.recordID == game }.map { try copy($0, tag: $0.changeTag) }
+        }
+
         func saveAtomically(_ values: [GroupStoredRecord]) async throws -> [CKRecord.ID: GroupStoredRecord] {
+            try await modify(values, deleting: [])
+        }
+
+        func saveManagement(
+            _ values: [GroupStoredRecord], deleting ids: [CKRecord.ID], checking share: GroupStoredRecord
+        ) async throws -> [CKRecord.ID: GroupStoredRecord] {
+            try await modify(values + [share], deleting: ids)
+        }
+
+        private func modify(
+            _ values: [GroupStoredRecord], deleting ids: [CKRecord.ID]
+        ) async throws -> [CKRecord.ID: GroupStoredRecord] {
             let before = beforeSave
             beforeSave = nil
             try await before?()
-            guard values.allSatisfy({ records[$0.record.recordID]?.changeTag == $0.changeTag }) else {
+            guard values.allSatisfy({ records[$0.record.recordID]?.changeTag == $0.changeTag }),
+                  ids.allSatisfy({ records[$0] != nil }) else {
                 throw GroupAtomicWriteError.conflict
             }
             let revision = commits + 1
@@ -340,6 +731,7 @@ struct GroupGameChecks {
                 (entry.record.recordID, try copy(entry, tag: String(revision)))
             })
             let output = try saved.mapValues { try copy($0, tag: $0.changeTag) }
+            for id in ids { records.removeValue(forKey: id) }
             records.merge(saved) { _, new in new }
             commits = revision
             let after = afterSave

@@ -5,6 +5,7 @@ import Foundation
 enum GroupGameError: LocalizedError, Equatable {
     case wrongGroup, notScorekeeper, gameNotFound, invalidRecord, invalidPlayers
     case invalidScores, invalidTransition, staleGame, reusedOperation
+    case gameDeleted, scorekeeperUnavailable, deletionTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -17,22 +18,39 @@ enum GroupGameError: LocalizedError, Equatable {
         case .invalidTransition: "That change isn’t available in this game’s current state."
         case .staleGame: "This game changed on another device. Refresh and review your change."
         case .reusedOperation: "This operation ID was already used for a different change."
+        case .gameDeleted: "This group game was permanently deleted."
+        case .scorekeeperUnavailable: "That member is no longer eligible to keep score. Refresh and choose an active member."
+        case .deletionTooLarge: "This game exceeds CloudKit’s limit for a single permanent deletion."
         }
     }
+}
+
+protocol GroupGameRecordStore: GroupRecordStore {
+    func gameChildren(of game: CKRecord.ID) async throws -> [GroupStoredRecord]
+    func saveManagement(
+        _ records: [GroupStoredRecord], deleting ids: [CKRecord.ID], checking share: GroupStoredRecord
+    ) async throws -> [CKRecord.ID: GroupStoredRecord]
+}
+
+struct GroupGameOwnerAuthority {
+    let share: GroupStoredRecord
+    let eligibleKeys: Set<String>
 }
 
 struct GroupGameStore {
     let groupID: UUID
     let root: CKRecord.ID
-    let store: any GroupRecordStore
+    let store: any GroupGameRecordStore
     let authorize: () async throws -> GroupRosterAccess
     let verifyAccount: () async throws -> Void
     let loadPlayers: () async throws -> [GroupPlayerIdentity]
+    let loadOwnerAuthority: () async throws -> GroupGameOwnerAuthority
 
     func list(fetchHeaders: () async throws -> [GroupStoredRecord]) async throws -> [GroupGameHeader] {
         _ = try await authorize()
-        let headers = try await fetchHeaders().map { entry in
+        let headers = try await fetchHeaders().compactMap { entry -> GroupGameHeader? in
             guard let id = Self.gameUUID(entry.record.recordID) else { throw GroupGameError.invalidRecord }
+            if try isDeleted(entry, game: id) { return nil }
             return try decodeHeader(entry, game: id)
         }
         try await verifyAccount()
@@ -44,26 +62,40 @@ struct GroupGameStore {
     }
 
     func load(_ gameID: UUID) async throws -> GroupGameSnapshot {
-        _ = try await authorize()
+        try await loadWithAccess(gameID).game
+    }
+
+    func loadWithAccess(_ gameID: UUID) async throws -> (game: GroupGameSnapshot, access: GroupRosterAccess) {
+        let access = try await authorize()
         let (_, header) = try await fetchHeader(gameID)
         var rounds: [GroupGameRound] = []
-        for number in 1...header.roundCount {
-            let (_, round) = try await fetchRound(number, header: header)
-            guard number == header.roundCount || round.hands.count == LevelDefinition.all.count else {
-                throw GroupGameError.invalidRecord
+        do {
+            for number in 1...header.roundCount {
+                let (_, round) = try await fetchRound(number, header: header)
+                guard number == header.roundCount || round.hands.count == LevelDefinition.all.count else {
+                    throw GroupGameError.invalidRecord
+                }
+                rounds.append(round)
             }
-            rounds.append(round)
+        } catch GroupGameError.invalidRecord {
+            // An in-flight read can reach a round just after the deletion batch removes it.
+            guard try await fetchHeader(gameID).1.version == header.version else { throw GroupGameError.staleGame }
+            throw GroupGameError.invalidRecord
         }
         let (_, current) = try await fetchHeader(gameID)
         guard current.version == header.version else { throw GroupGameError.staleGame }
         try await verifyAccount()
-        return GroupGameSnapshot(header: header, rounds: rounds)
+        return (GroupGameSnapshot(header: header, rounds: rounds), access)
     }
 
     func perform(_ operation: GroupGameOperation) async throws -> GroupGameReceipt {
         guard operation.groupID == groupID else { throw GroupGameError.wrongGroup }
         let access = try await authorize()
-        try access.requireAdd()
+        if operation.action.requiresOwner {
+            try access.requireOwner()
+        } else {
+            try access.requireAdd()
+        }
         let revision = try resultRevision(for: operation)
         let fingerprint = GroupRoster.digest("game-operation-v1:" + String(decoding: try encode(operation), as: UTF8.self))
         if let receipt = try await findReceipt(for: operation, revision: revision, key: access.creatorKey, fingerprint: fingerprint) {
@@ -72,23 +104,37 @@ struct GroupGameStore {
 
         let receiptID = receiptID(for: operation)
         do {
-            var changes = try await changes(for: operation, revision: revision, access: access)
+            var batch = try await changes(for: operation, revision: revision, access: access)
             let acknowledgment = newRecord(GroupRecordTypes.gameOperation, id: receiptID, parent: gameID(operation.gameID))
             acknowledgment.record["actorKey"] = access.creatorKey
             acknowledgment.record["fingerprint"] = fingerprint
             acknowledgment.record["revision"] = revision
-            changes.append(acknowledgment)
+            batch.records.append(acknowledgment)
 
             guard try await authorize() == access else { throw GroupRosterError.notAuthorized }
             try Task.checkCancellation()
-            let saved = try await store.saveAtomically(changes)
+            let saved: [CKRecord.ID: GroupStoredRecord]
+            if operation.action.requiresOwner {
+                let authority = try await loadOwnerAuthority()
+                if case .reassignScorekeeper(let key) = operation.action, !authority.eligibleKeys.contains(key) {
+                    throw GroupGameError.scorekeeperUnavailable
+                }
+                // A membership change after the eligibility check invalidates the share's change tag.
+                saved = try await store.saveManagement(batch.records, deleting: batch.deleting, checking: authority.share)
+            } else {
+                saved = try await store.saveAtomically(batch.records)
+            }
             try await verifyAccount()
             guard let stored = saved[receiptID] else {
                 throw GroupAtomicWriteError.unconfirmed(GroupGameError.invalidRecord)
             }
             return try decodeReceipt(stored, operation: operation, revision: revision,
                                      key: access.creatorKey, fingerprint: fingerprint)
-        } catch let error where error is GroupAtomicWriteError || (error as? GroupGameError) == .staleGame {
+        } catch let error as CKError where error.code == .limitExceeded {
+            if case .delete = operation.action { throw GroupGameError.deletionTooLarge }
+            throw error
+        } catch let error where error is GroupAtomicWriteError ||
+            (error as? GroupGameError) == .staleGame || (error as? GroupGameError) == .gameDeleted {
             // A matching receipt is durable even if a later operation updated the game.
             guard try await authorize() == access else { throw GroupRosterError.notAuthorized }
             if let receipt = try await findReceipt(
@@ -115,18 +161,33 @@ struct GroupGameStore {
 
     private func changes(
         for operation: GroupGameOperation, revision: Int, access: GroupRosterAccess
-    ) async throws -> [GroupStoredRecord] {
+    ) async throws -> (records: [GroupStoredRecord], deleting: [CKRecord.ID]) {
         let game = operation.gameID
         if case .create(let playerIDs) = operation.action {
-            return try await createRecords(id: game, playerIDs: playerIDs, key: access.creatorKey)
+            if let existing = try await store.record(for: gameID(game)), try isDeleted(existing, game: game) {
+                throw GroupGameError.gameDeleted
+            }
+            return (try await createRecords(id: game, playerIDs: playerIDs, key: access.creatorKey), [])
         }
         let (entry, header) = try await fetchHeader(game)
-        guard header.scorekeeperKey == access.creatorKey else { throw GroupGameError.notScorekeeper }
+        if !operation.action.requiresOwner, !access.isScorekeeper(header.scorekeeperKey) {
+            throw GroupGameError.notScorekeeper
+        }
         guard header.version == operation.expectedVersion else { throw GroupGameError.staleGame }
+        if case .delete = operation.action {
+            let children = try await childrenForDeletion(header)
+            entry.record["revision"] = revision
+            entry.record["deletedAt"] = Date.now
+            for key in ["participants", "creatorKey", "scorekeeperKey", "roundCount", "completedAt", "cancelledAt"] {
+                entry.record[key] = nil
+            }
+            return ([entry], children)
+        }
+        guard header.status == .inProgress else { throw GroupGameError.invalidTransition }
         entry.record["revision"] = revision
 
         switch operation.action {
-        case .create:
+        case .create, .delete:
             throw GroupGameError.invalidTransition
         case .saveHand(let number, let hand):
             guard (1...header.roundCount).contains(number) else { throw GroupGameError.invalidTransition }
@@ -136,27 +197,62 @@ struct GroupGameStore {
             if hand.number <= hands.count {
                 hands[hand.number - 1] = hand
             } else {
-                guard header.completedAt == nil, number == header.roundCount, hand.number == hands.count + 1 else {
+                guard number == header.roundCount, hand.number == hands.count + 1 else {
                     throw GroupGameError.invalidTransition
                 }
                 hands.append(hand)
             }
             roundEntry.record["hands"] = try encode(hands)
-            return [entry, roundEntry]
+            return ([entry, roundEntry], [])
         case .startNextRound:
-            guard header.completedAt == nil, header.roundCount < Int.max else {
+            guard header.roundCount < Int.max else {
                 throw GroupGameError.invalidTransition
             }
             let (_, current) = try await fetchRound(header.roundCount, header: header)
             guard current.hands.count == LevelDefinition.all.count else { throw GroupGameError.invalidTransition }
             let next = header.roundCount + 1
             entry.record["roundCount"] = next
-            return [entry, try newRound(game: game, number: next)]
+            return ([entry, try newRound(game: game, number: next)], [])
         case .complete:
-            guard header.completedAt == nil else { throw GroupGameError.invalidTransition }
             entry.record["completedAt"] = Date.now
-            return [entry]
+            return ([entry], [])
+        case .reassignScorekeeper(let key):
+            guard key != header.scorekeeperKey else { throw GroupGameError.invalidTransition }
+            entry.record["scorekeeperKey"] = key
+            return ([entry], [])
+        case .cancel:
+            entry.record["cancelledAt"] = Date.now
+            return ([entry], [])
         }
+    }
+
+    private func childrenForDeletion(_ header: GroupGameHeader) async throws -> [CKRecord.ID] {
+        let parent = gameID(header.id)
+        let children = try await store.gameChildren(of: parent)
+        guard try await fetchHeader(header.id).1.version == header.version else { throw GroupGameError.staleGame }
+        var rounds: Set<CKRecord.ID> = []
+        var revisions: Set<Int> = []
+        for child in children {
+            let record = child.record
+            guard record.parent?.recordID == parent, record.recordID.zoneID == parent.zoneID,
+                  child.changeTag != nil else { throw GroupGameError.invalidRecord }
+            switch record.recordType {
+            case GroupRecordTypes.gameRound:
+                guard rounds.insert(record.recordID).inserted else { throw GroupGameError.invalidRecord }
+            case GroupRecordTypes.gameOperation:
+                let prefix = "game-op-\(header.id.uuidString)-"
+                guard record.recordID.recordName.hasPrefix(prefix),
+                      UUID(uuidString: String(record.recordID.recordName.dropFirst(prefix.count))) != nil,
+                      let revision = record["revision"] as? Int, (1...header.version.revision).contains(revision),
+                      revisions.insert(revision).inserted else { throw GroupGameError.invalidRecord }
+            default:
+                throw GroupGameError.invalidRecord
+            }
+        }
+        guard rounds.count == header.roundCount,
+              (1...header.roundCount).allSatisfy({ rounds.contains(roundID(game: header.id, number: $0)) }),
+              revisions.count == header.version.revision else { throw GroupGameError.invalidRecord }
+        return children.map(\.record.recordID)
     }
 
     private func createRecords(id: UUID, playerIDs: [UUID], key: String) async throws -> [GroupStoredRecord] {
@@ -185,7 +281,16 @@ struct GroupGameStore {
     private func fetchHeader(_ game: UUID) async throws -> (GroupStoredRecord, GroupGameHeader) {
         let id = gameID(game)
         guard let entry = try await store.record(for: id) else { throw GroupGameError.gameNotFound }
+        if try isDeleted(entry, game: game) { throw GroupGameError.gameDeleted }
         return (entry, try decodeHeader(entry, game: game))
+    }
+
+    private func isDeleted(_ entry: GroupStoredRecord, game: UUID) throws -> Bool {
+        guard entry.record["deletedAt"] != nil else { return false }
+        guard isRecord(entry, type: GroupRecordTypes.game, id: gameID(game), parent: root),
+              entry.record["deletedAt"] is Date, let revision = entry.record["revision"] as? Int,
+              revision > 1 else { throw GroupGameError.invalidRecord }
+        return true
     }
 
     private func decodeHeader(_ entry: GroupStoredRecord, game: UUID) throws -> GroupGameHeader {
@@ -202,10 +307,13 @@ struct GroupGameStore {
             throw GroupGameError.invalidRecord
         }
         let completed = record["completedAt"] as? Date
-        guard record["completedAt"] == nil || completed != nil else { throw GroupGameError.invalidRecord }
+        let cancelled = record["cancelledAt"] as? Date
+        guard record["completedAt"] == nil || completed != nil,
+              record["cancelledAt"] == nil || cancelled != nil,
+              completed == nil || cancelled == nil else { throw GroupGameError.invalidRecord }
         return GroupGameHeader(
             id: game, groupID: groupID, participants: participants, creatorKey: creator, scorekeeperKey: scorekeeper,
-            roundCount: roundCount, completedAt: completed, createdAt: record.creationDate,
+            roundCount: roundCount, completedAt: completed, cancelledAt: cancelled, createdAt: record.creationDate,
             updatedAt: record.modificationDate, version: GroupGameVersion(revision: revision, changeTag: tag)
         )
     }
@@ -310,7 +418,12 @@ extension GroupRepository {
         let roster = self.roster(for: group, account: account)
         return GroupGameStore(
             groupID: group.id, root: roster.root, store: cloudStore(for: group, account: account),
-            authorize: roster.authorize, verifyAccount: roster.verifyAccount, loadPlayers: { try await roster.players() }
+            authorize: roster.authorize, verifyAccount: roster.verifyAccount, loadPlayers: { try await roster.players() },
+            loadOwnerAuthority: {
+                let share = try await gameManagementShare(for: group, account: account)
+                let keys = Self.eligibleScorekeepers(in: share).map { Self.scorekeeperKey(for: $0, group: group) }
+                return GroupGameOwnerAuthority(share: GroupStoredRecord(share), eligibleKeys: Set(keys))
+            }
         )
     }
 
@@ -326,15 +439,69 @@ extension GroupRepository {
         var names = [viewerKey: "You"]
         guard let liveDetails = try? await details(for: group) else { return names }
         let details = await loadMemberDisplayNames(in: liveDetails, account: account)
-        for participant in [details.share.owner] + details.members where !details.isCurrentUser(participant) {
+        for participant in [details.share.owner] + details.members {
             let isOwner = participant.role == .owner
             guard isOwner || participant.acceptanceStatus == .accepted else { continue }
+            let isYou = details.isCurrentUser(participant)
+            let name = isYou ? "You" : details.displayName(for: participant) ?? (isOwner ? "Group owner" : "Group member")
+            names[Self.scorekeeperKey(for: participant, group: group)] = name
+            guard !isYou else { continue }
             let userID = isOwner ? group.zoneOwner : participant.userIdentity.userRecordID?.recordName
             guard let userID, userID != CKCurrentUserDefaultName, userID != account else { continue }
             let key = GroupRosterAccess(role: .reader, groupID: group.id, account: userID).creatorKey
-            names[key] = details.displayName(for: participant) ?? (isOwner ? "Group owner" : "Group member")
+            names[key] = name
         }
         return names
+    }
+
+    func gameScorekeeperCandidates(for group: GroupSummary, account: String) async throws -> [GroupGameScorekeeperCandidate] {
+        let share = try await gameManagementShare(for: group, account: account)
+        let details = await loadMemberDisplayNames(
+            in: GroupDetails(group: group, share: share, invitationURL: nil), account: account
+        )
+        return Self.eligibleScorekeepers(in: share).enumerated().map { index, participant in
+            let name = details.isCurrentUser(participant)
+                ? "You (Group owner)"
+                : details.displayName(for: participant) ?? "Group member \(index)"
+            return GroupGameScorekeeperCandidate(id: Self.scorekeeperKey(for: participant, group: group), name: name)
+        }
+    }
+
+    private static func eligibleScorekeepers(in share: CKShare) -> [CKShare.Participant] {
+        [share.owner] + share.participants.filter {
+            $0.role != .owner && $0.acceptanceStatus == .accepted && $0.permission == .readWrite
+        }
+    }
+
+    private static func scorekeeperKey(for participant: CKShare.Participant, group: GroupSummary) -> String {
+        GroupRosterAccess.scorekeeperKey(groupID: group.id, participantID: participant.participantID)
+    }
+}
+
+extension GroupCloudStore: GroupGameRecordStore {
+    func gameChildren(of game: CKRecord.ID) async throws -> [GroupStoredRecord] {
+        guard game.zoneID == zoneID, let id = GroupGameStore.gameUUID(game) else {
+            throw GroupGameError.invalidRecord
+        }
+        var children: [CKRecord.ID: GroupStoredRecord] = [:]
+        var token: CKServerChangeToken?
+        while true {
+            let page = try await database.recordZoneChanges(inZoneWith: zoneID, since: token, desiredKeys: ["revision"])
+            for (recordID, result) in page.modificationResultsByID {
+                let knownChild = recordID.recordName.hasPrefix("game-round-\(id.uuidString)-") ||
+                    recordID.recordName.hasPrefix("game-op-\(id.uuidString)-")
+                if case .success(let change) = result, change.record.parent?.recordID == game {
+                    guard change.record.recordID == recordID else { throw GroupGameError.invalidRecord }
+                    children[recordID] = GroupStoredRecord(change.record)
+                } else if knownChild {
+                    _ = try result.get()
+                    throw GroupGameError.invalidRecord
+                }
+            }
+            for deletion in page.deletions { children.removeValue(forKey: deletion.recordID) }
+            guard page.moreComing else { return Array(children.values) }
+            token = page.changeToken
+        }
     }
 }
 
@@ -342,7 +509,8 @@ private extension GroupCloudStore {
     func gameHeaderRecords() async throws -> [GroupStoredRecord] {
         var headers: [CKRecord.ID: GroupStoredRecord] = [:]
         var token: CKServerChangeToken?
-        let keys = ["participants", "creatorKey", "scorekeeperKey", "revision", "roundCount", "completedAt"]
+        let keys = ["participants", "creatorKey", "scorekeeperKey", "revision", "roundCount", "completedAt",
+                    "cancelledAt", "deletedAt"]
         while true {
             let page = try await database.recordZoneChanges(inZoneWith: zoneID, since: token, desiredKeys: keys)
             for (id, result) in page.modificationResultsByID {

@@ -32,35 +32,7 @@ struct GroupGameHistoryView: View {
     }
 }
 
-struct GroupGameDetailView: View {
-    let route: GroupGameRoute
-    let model: GroupsModel
-
-    var body: some View {
-        GroupGameReadScreen(group: route.group, model: model, title: "Group Game") {
-            try await model.withSharedGroup(route.group) { repository, account in
-                let game = try await repository.games(for: route.group, account: account).load(route.gameID)
-                let names = await repository.gameScorekeeperNames(for: route.group, account: account)
-                return (game: game, scorekeeper: names[game.header.scorekeeperKey])
-            }
-        } content: { detail in
-            let header = detail.game.header
-            Section {
-                GroupGameSummary(header: header, scorekeeper: detail.scorekeeper)
-            }
-            ForEach(detail.game.rounds) { round in
-                Section("Round \(round.id.number)") {
-                    if round.hands.isEmpty { Text("No scores entered").foregroundStyle(.secondary) }
-                    ForEach(round.hands, id: \.number) { hand in
-                        GroupGameHandScores(hand: hand, participants: header.participants)
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct GroupGameSummary: View {
+struct GroupGameSummary: View {
     let header: GroupGameHeader
     let scorekeeper: String?
 
@@ -74,8 +46,7 @@ private struct GroupGameSummary: View {
             Text(header.participants.map(\.displayName).formatted(.list(type: .and)))
             Text("Scorekeeper: \(scorekeeper ?? "Name unavailable")")
                 .font(.subheadline).foregroundStyle(.secondary)
-            Label(header.completedAt == nil ? "In progress" : "Completed",
-                  systemImage: header.completedAt == nil ? "clock" : "checkmark.circle")
+            Label(header.status.title, systemImage: header.status.icon)
                 .font(.subheadline).foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
@@ -83,7 +54,7 @@ private struct GroupGameSummary: View {
     }
 }
 
-private struct GroupGameHandScores: View {
+struct GroupGameHandScores: View {
     let hand: GroupGameHand
     let participants: [GroupGameParticipant]
 
@@ -135,7 +106,7 @@ private struct GroupGameReadScreen<Value, Content: View>: View {
                 ContentUnavailableView("Group Unavailable", systemImage: "person.3")
             } else {
                 Section {
-                    SectionIntroCard(title: group.name, subtitle: title == "Games" ? "Group games" : "Shared scores",
+                    SectionIntroCard(title: group.name, subtitle: "Group games",
                                      icon: "rectangle.stack")
                         .listRowBackground(Color.clear)
                 }

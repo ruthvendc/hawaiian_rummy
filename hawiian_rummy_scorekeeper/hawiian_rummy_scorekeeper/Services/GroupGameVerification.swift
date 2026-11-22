@@ -89,7 +89,9 @@ enum GroupGameVerification {
         case "rollback":
             try require(!isOwner, "Run rollback as the member.")
             let before = try await games.load(ownGame)
-            try require(before.header.version.revision == 2, "Run rollback after the member's write check.")
+            try require(before.header.version.revision == 4 && before.header.completedAt == nil &&
+                        before.rounds.first?.hands == [hand(1, points: 21, header: before.header)],
+                        "Run rollback after the member's retry check.")
             let competing = operation(5, header: before.header, action: .complete)
             let stale = operation(6, header: before.header,
                                   action: .saveHand(round: 1, hand: hand(2, points: 7, header: before.header)))
@@ -100,7 +102,7 @@ enum GroupGameVerification {
             } catch GroupGameError.staleGame {
                 let after = try await games.load(ownGame)
                 let missingReceipt = try await games.store.record(for: games.receiptID(for: stale))
-                try require(after.header.version.revision == 3 && after.header.completedAt != nil &&
+                try require(after.header.version.revision == 5 && after.header.completedAt != nil &&
                             after.rounds == before.rounds && missingReceipt == nil,
                             "CloudKit left a score change or receipt from the rejected batch.")
             }
@@ -122,9 +124,10 @@ enum GroupGameVerification {
             let recovered = try await interrupted.perform(original)
             let retried = try await games.perform(original)
             let latest = try await games.load(ownGame)
-            try require(recovered == retried && recovered.revision == 4 && latest.header.version.revision == 5 &&
+            try require(recovered == retried && recovered.revision == 3 && latest.header.version.revision == 4 &&
+                        latest.header.completedAt == nil &&
                         latest.rounds.first?.hands == [newer], "Retry did not recover the original receipt and preserve the newer scores.")
-            return "Recovered revision 4 from its receipt after a simulated lost response. Revision 5 and its scores were preserved."
+            return "Recovered revision 3 from its receipt after a simulated lost response. Revision 4 and its scores were preserved."
         default:
             throw Failure("Unknown verification step.")
         }
@@ -136,23 +139,21 @@ enum GroupGameVerification {
         let header = snapshot.header
         let access = try await games.authorize()
         let isScorekeeper = access.role == .editor && access.creatorKey == header.scorekeeperKey
-        let completion = try await receiptStatus(5, revision: 3, header: header, games: games)
-        let rejected = try await receiptStatus(6, revision: 3, header: header, games: games)
-        let firstRetry = try await receiptStatus(7, revision: 4, header: header, games: games)
-        let newerRetry = try await receiptStatus(8, revision: 5, header: header, games: games)
+        let initial = try await receiptStatus(3, revision: 2, header: header, games: games)
+        let firstRetry = try await receiptStatus(7, revision: 3, header: header, games: games)
+        let newerRetry = try await receiptStatus(8, revision: 4, header: header, games: games)
         try await games.verifyAccount()
 
         let originalHand = hand(1, points: 3, header: header)
-        let isReady = header.version.revision == 3 && header.completedAt != nil &&
+        let isReady = header.version.revision == 2 && header.completedAt == nil &&
             snapshot.rounds.count == 1 && snapshot.rounds.first?.hands == [originalHand] &&
-            isScorekeeper && completion == .verified && rejected == .missing &&
-            firstRetry == .missing && newerRetry == .missing
+            isScorekeeper && initial == .verified && firstRetry == .missing && newerRetry == .missing
         let state = isReady ? "READY" : "BLOCKED"
         let hands = snapshot.rounds.first?.hands.count ?? 0
         let scorekeeper = isScorekeeper ? "yes" : "no"
         let message = "\(state) for retry. Member game \(header.id): \(summary(snapshot)), \(hands) hand(s) in round 1. " +
-            "Scorekeeper matches: \(scorekeeper). Receipts 05/06/07/08: " +
-            "\(completion.rawValue)/\(rejected.rawValue)/\(firstRetry.rawValue)/\(newerRetry.rawValue)."
+            "Scorekeeper matches: \(scorekeeper). Receipts 03/07/08: " +
+            "\(initial.rawValue)/\(firstRetry.rawValue)/\(newerRetry.rawValue)."
         return (isReady, message)
     }
 
@@ -214,16 +215,27 @@ enum GroupGameVerification {
         GroupGameStore(
             groupID: games.groupID, root: games.root,
             store: InterceptedStore(base: games.store, beforeSave: beforeSave, afterSave: afterSave),
-            authorize: games.authorize, verifyAccount: games.verifyAccount, loadPlayers: games.loadPlayers
+            authorize: games.authorize, verifyAccount: games.verifyAccount, loadPlayers: games.loadPlayers,
+            loadOwnerAuthority: games.loadOwnerAuthority
         )
     }
 
-    private struct InterceptedStore: GroupRecordStore {
-        let base: any GroupRecordStore
+    private struct InterceptedStore: GroupGameRecordStore {
+        let base: any GroupGameRecordStore
         let beforeSave: () async throws -> Void
         let afterSave: () async throws -> Void
 
         func record(for id: CKRecord.ID) async throws -> GroupStoredRecord? { try await base.record(for: id) }
+
+        func gameChildren(of game: CKRecord.ID) async throws -> [GroupStoredRecord] {
+            try await base.gameChildren(of: game)
+        }
+
+        func saveManagement(
+            _ records: [GroupStoredRecord], deleting ids: [CKRecord.ID], checking share: GroupStoredRecord
+        ) async throws -> [CKRecord.ID: GroupStoredRecord] {
+            try await base.saveManagement(records, deleting: ids, checking: share)
+        }
 
         func saveAtomically(_ records: [GroupStoredRecord]) async throws -> [CKRecord.ID: GroupStoredRecord] {
             try await beforeSave()

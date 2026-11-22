@@ -61,7 +61,7 @@ database and members use the shared database.
 
 | Record type | Record name and parent | Custom fields |
 | --- | --- | --- |
-| `GroupGameV1` | `game-<game UUID>`, parent is the group root | `participants` (Bytes, ordered UUID and display-name snapshots), `creatorKey` and `scorekeeperKey` (String), `revision` and `roundCount` (Int64), `completedAt` (optional Timestamp) |
+| `GroupGameV1` | `game-<game UUID>`, parent is the group root | `participants` (Bytes, ordered UUID and display-name snapshots), `creatorKey` and `scorekeeperKey` (String), `revision` and `roundCount` (Int64), `completedAt`, `cancelledAt`, and `deletedAt` (optional Timestamp) |
 | `GroupGameRoundV1` | `game-round-<game UUID>-<round number>`, parent is the game header | `hands` (Bytes, hand numbers and scores by player UUID) |
 | `GroupGameOperationV1` | `game-op-<game UUID>-<operation UUID>`, parent is the game header | `actorKey` and `fingerprint` (String), `revision` (Int64) |
 
@@ -80,6 +80,19 @@ the game header revision. The receipt binds the authenticated actor, command
 payload and resulting revision to the operation UUID. A retry returns only
 the original receipt. A fresh read supplies the current game state. A
 rejected stale write must leave neither partial changes nor a receipt.
+
+Increment 3A adds `cancelledAt` and `deletedAt` in Development. Use the same
+3A build on both devices. Reassignment stores a group-scoped digest of the live
+share participant ID in the existing scorekeeper field. Existing unreassigned
+games continue to use the account-based digest. Owner management saves the
+live share and game at their fetched change tags in the owner's private
+database. A concurrent membership or game change rejects the batch.
+
+A permanent deletion saves a marker with the original game ID, the deletion
+timestamp, and the revision. The same batch removes the game's rounds, earlier
+operation receipts, and player and scorekeeper data on its header. The deletion
+receipt stays attached to the marker so a retry can confirm the operation.
+If CloudKit rejects the batch for its size, the game stays intact.
 
 ## Capture the device output
 
@@ -105,6 +118,10 @@ session. It does not need synchronized clocks or a run-destination switch.
 
 ## Numbered checklist
 
+For a fresh run on Increment 3 or later, run the retry check before rollback
+so that the retry updates an in-progress game. The recorded Increment 1
+results above describe the original sequence.
+
 1. **Owner creation.** On Phone A, create the new disposable group with the
    ordinary Debug app. In Group Players, add `Storage Player One` and
    `Storage Player Two` as active players. Run `owner-create` on A. Expect
@@ -120,28 +137,27 @@ session. It does not need synchronized clocks or a run-destination switch.
    should save its own first hand at revision 2 and reject a completion
    attempt on the other scorekeeper’s game. Run `read` on both and verify
    the two revision 2 games each have one hand with scores of 3 and 3.
-5. **Stale batch and atomic rollback.** Run `rollback` on B. It prepares
-   a batch that would add hand 2, commits completion separately, then
-   submits the stale batch. Expect the completed game at revision 3,
-   with hand 1 intact, hand 2 absent, and no receipt for the stale batch.
-   On A, run `read` and verify the completed member game.
-6. **Ambiguous save and delayed retry.** Run `retry-status` on B first. This
+5. **Ambiguous save and delayed retry.** Run `retry-status` on B first. This
    command only reads the member game and receipts. Continue with `retry`
-   on B only if the console reports `READY for retry`, with revision 3
-   complete, one hand scored 3 and 3, and receipts 05/06/07/08 listed as
-   `verified/missing/missing/missing`. If the status is `BLOCKED`, capture
+   on B only if the console reports `READY for retry`, with revision 2
+   in progress, one hand scored 3 and 3, and receipts 03/07/08 listed as
+   `verified/missing/missing`. If the status is `BLOCKED`, capture
    the full line and leave the game and its receipts in place. The `retry` check commits a
-   correction at revision 4, commits a newer correction at revision 5,
+   correction at revision 3, commits a newer correction at revision 4,
    then simulates loss of the first save response. Expect recovery of
-   revision 4’s receipt and preservation of revision 5. Run `read` on
-   both phones and verify the completed member game still has revision 5
-   and scores of 21 and 21.
+   revision 3’s receipt and preservation of revision 4 and its scores
+   of 21 and 21.
+6. **Stale batch and atomic rollback.** Run `rollback` on B. It prepares
+   a batch that would add hand 2, commits completion separately, then
+   submits the stale batch. Expect the completed game at revision 5,
+   with hand 1 scored 21 and 21, hand 2 absent, and no receipt for the
+   stale batch. On A, run `read` and verify the completed member game.
 7. **Revoked access.** In this test group only, remove B’s access on A.
    Once the change is confirmed, run `revoked` on B. Expect the group
    to be absent from B’s discovery. Run `read` on A and verify both games
    and the last recorded scores are still available.
 
-The live checks remain pending until reported from the phones. Stop on a
+Verification of the revised sequence remains pending. Stop on a
 missing atomic capability, unexpected write, or partial record set. Save the
 logs and leave the test data in place. Use a fresh uniquely named disposable
 group for a repeat that needs the original revisions.

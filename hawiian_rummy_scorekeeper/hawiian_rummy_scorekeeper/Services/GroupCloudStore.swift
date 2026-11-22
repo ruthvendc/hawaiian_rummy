@@ -59,35 +59,55 @@ struct GroupCloudStore: GroupRecordStore {
     }
 
     func saveAtomically(_ records: [GroupStoredRecord]) async throws -> [CKRecord.ID: GroupStoredRecord] {
-        let updates = records.map(\.record)
-        guard updates.allSatisfy({ $0.recordID.zoneID == zoneID }) else { throw GroupCloudStoreError.wrongZone }
-        guard !records.isEmpty, Set(updates.map(\.recordID)).count == updates.count,
-              records.allSatisfy({ entry in
-                  entry.record.parent?.recordID.zoneID == zoneID && entry.changeTag == entry.record.recordChangeTag
-              }) else { throw GroupCloudStoreError.invalidBatch }
+        try await modifyAtomically(records, deleting: [], checking: nil)
+    }
+
+    func saveManagement(
+        _ records: [GroupStoredRecord], deleting ids: [CKRecord.ID], checking share: GroupStoredRecord
+    ) async throws -> [CKRecord.ID: GroupStoredRecord] {
+        guard database.databaseScope == .private,
+              let shareRecord = share.record as? CKShare, shareRecord.currentUserParticipant?.role == .owner,
+              shareRecord.publicPermission == .none,
+              share.changeTag != nil else { throw GroupRosterError.notAuthorized }
+        return try await modifyAtomically(records, deleting: ids, checking: share)
+    }
+
+    private func modifyAtomically(
+        _ records: [GroupStoredRecord], deleting ids: [CKRecord.ID], checking share: GroupStoredRecord?
+    ) async throws -> [CKRecord.ID: GroupStoredRecord] {
+        let entries = records + (share.map { [$0] } ?? [])
+        let updates = entries.map(\.record)
+        let changedIDs = updates.map(\.recordID) + ids
+        guard changedIDs.allSatisfy({ $0.zoneID == zoneID }) else { throw GroupCloudStoreError.wrongZone }
+        guard !records.isEmpty, Set(changedIDs).count == changedIDs.count,
+              records.allSatisfy({ $0.record.parent?.recordID.zoneID == zoneID }),
+              entries.allSatisfy({ $0.changeTag == $0.record.recordChangeTag }) else {
+            throw GroupCloudStoreError.invalidBatch
+        }
         let zone = try await database.recordZone(for: zoneID)
         guard zone.zoneID == zoneID, zone.capabilities.contains(.atomic) else {
             throw GroupCloudStoreError.atomicUnavailable
         }
         try await verifyAccount()
         try Task.checkCancellation()
-        let results: [CKRecord.ID: Result<CKRecord, any Error>]
+        let saves: [CKRecord.ID: Result<CKRecord, any Error>]
+        let deletions: [CKRecord.ID: Result<Void, any Error>]
         do {
-            results = try await database.modifyRecords(
-                saving: updates, deleting: [], savePolicy: .ifServerRecordUnchanged, atomically: true
-            ).saveResults
+            (saves, deletions) = try await database.modifyRecords(
+                saving: updates, deleting: ids, savePolicy: .ifServerRecordUnchanged, atomically: true
+            )
         } catch {
             let partial = (error as? CKError)?.partialErrorsByItemID
             throw Self.writeFailure(partial.map { Array($0.values) } ?? [error])
         }
-        let errors = results.values.compactMap { result -> (any Error)? in
-            guard case .failure(let error) = result else { return nil }
-            return error
-        }
+        let errors = saves.values.compactMap(Self.failure) + deletions.values.compactMap(Self.failure)
         if !errors.isEmpty { throw Self.writeFailure(errors) }
+        guard ids.allSatisfy({ deletions[$0] != nil }) else {
+            throw GroupAtomicWriteError.unconfirmed(GroupCloudStoreError.invalidBatch)
+        }
         var saved: [CKRecord.ID: GroupStoredRecord] = [:]
         for record in updates {
-            guard let result = results[record.recordID] else {
+            guard let result = saves[record.recordID] else {
                 throw GroupAtomicWriteError.unconfirmed(GroupCloudStoreError.invalidBatch)
             }
             let confirmed = GroupStoredRecord(try result.get())
@@ -97,6 +117,11 @@ struct GroupCloudStore: GroupRecordStore {
             saved[record.recordID] = confirmed
         }
         return saved
+    }
+
+    private static func failure<Value>(_ result: Result<Value, any Error>) -> (any Error)? {
+        guard case .failure(let error) = result else { return nil }
+        return error
     }
 
     static func writeFailure(_ errors: [any Error]) -> any Error {
