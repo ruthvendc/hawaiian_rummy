@@ -5,6 +5,24 @@ and a new disposable group. Phones A and B must use different Apple Accounts.
 The command runs once per launch and logs to the Xcode console under
 `[Roster verification]`. Remove the launch argument when finished.
 
+## Recorded Increment 2 results
+
+The owner reported all six checks passed on two physical iPhones signed in to
+different Apple Accounts in CloudKit Development. The test group was
+`Roster-Verification-1121`.
+
+| Check | Result |
+| --- | --- |
+| Owner create | PASS — The owner saved and read back a player and reservation through the private database. |
+| Member create | PASS — The approved member saved and read back a player and reservation through the shared database. |
+| Cross-account read | PASS — Both phones saw both seeded player and reservation pairs. |
+| Concurrent equivalent names | PASS — Both phones reached READY, the member committed, and the owner reported Duplicate rejected. Both phones then found exactly one valid race player and reservation. |
+| Atomic rollback and name reuse | PASS — Rejected batches preserved the original records and reservations. A later rename released a name that a different player could claim. |
+| Ambiguous save | PASS — The original draft UUID recovered a real committed write after a simulated lost response, yielding one player and reservation. |
+
+Increment 2 is complete for Debug and CloudKit Development. The test group is
+retained. The instructions below remain available for targeted regression checks.
+
 ## Development schema
 
 The existing `GroupV1` root and hierarchical share hold both new record types.

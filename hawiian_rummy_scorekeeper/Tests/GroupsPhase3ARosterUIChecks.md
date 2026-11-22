@@ -6,8 +6,52 @@ arguments disabled. Phone A owns the test group. Phone B joins as an approved
 member. Use a new group named **Roster UI Test** or an unused variant. Keep
 `Roster-Verification-1121` and existing groups and records intact.
 
-Run one numbered check at a time and report the result before moving on.
-These checks are pending until observed on the devices.
+## Recorded Increment 3 results
+
+The owner reported all eight categories passed on two physical iPhones signed in
+to different Apple Accounts in CloudKit Development. The device runs used
+`Roster UI Test` and `Roster UI Test 2`. Both test groups are retained.
+
+| Check | Result |
+| --- | --- |
+| Group roster visibility | PASS — The owner and approved member saw the same roster. |
+| Player creation and synchronization | PASS — Both phones saw players added by the other account. |
+| Duplicate-name protection | PASS — Case and surrounding whitespace were ignored within a group. Identical names worked across groups and personal rosters. |
+| Rename permissions | PASS — The owner could rename any player. A member could rename only their own additions. |
+| Retirement and restoration | PASS — Owner actions moved players between active and retired lists. Retired names stayed reserved and member retirement was unavailable. |
+| Offline behavior | PASS — Saved players remained visible, editing controls disappeared, and editing returned after reconnection. |
+| Revocation and reapproval | PASS — Revocation removed access. Reapproval of the same account restored access and original creator rename rights. |
+| Personal data regression | PASS — Existing personal Players, Games, and Records remained intact. |
+
+[Increment 2's six live CloudKit checks](GroupsPhase3ARosterDeviceChecks.md#recorded-increment-2-results)
+also passed, including concurrent duplicate prevention, atomic rollback and
+ambiguous-save recovery.
+
+## Development status and remaining scope
+
+The scoped Phase 3A roster implementation and device acceptance are complete
+in Debug and CloudKit Development. Phase 3B is pending plan approval.
+
+- The original Groups V1 plan also calls for an explicit copy from personal
+  Players into a group. Direct group-player entry is available. Personal-player
+  copy remains open in the broader plan.
+- Roster viewing uses an account-scoped saved snapshot offline. A cold launch
+  requires identifying the current iCloud account to display that snapshot.
+  Edits require live access, and a disconnected device learns of revocation
+  when it next verifies access.
+- Owner and creator editing rules are app-level controls. CloudKit read/write
+  share participants have broader record permissions.
+- Group game selection and historical references are deferred to Phase 3B.
+  Offline game creation and scoring, durable sync, group Records, and
+  independent Games and Records filters remain Phase 4 work. Release and
+  Production verification remain Phase 5 work.
+- The shared Debug Run scheme has no roster verification launch arguments.
+  Verification is opt-in. The `retry` check can issue a write to its named
+  Development group when explicitly requested.
+
+## Device procedures
+
+Run one numbered check at a time for a targeted regression check.
 
 1. **Owner and member visibility.** On A, create **Roster UI Test** and share
    the invitation. On B, request access. Verify B cannot open the group before
