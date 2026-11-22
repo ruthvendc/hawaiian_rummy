@@ -32,6 +32,11 @@ struct GroupDetailView: View {
                 } label: {
                     Label("Players", systemImage: "person.2.fill")
                 }
+                NavigationLink {
+                    GroupGameHistoryView(group: group, model: model)
+                } label: {
+                    Label("Games", systemImage: "rectangle.stack")
+                }
             }
             if let details {
                 membersSection(details)
@@ -232,7 +237,7 @@ struct GroupDetailView: View {
             case .revoke(_, let name): "\(name) will lose access to this group."
             case .block(_, let name): "\(name) will no longer be able to request access to this group."
             case .removeGroup(let owner):
-                owner ? "This permanently deletes the shared group and its player roster for everyone."
+                owner ? "This permanently deletes the shared group, its players, and its games for everyone."
                     : "You’ll need the owner’s approval to rejoin."
             }
         }

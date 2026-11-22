@@ -236,7 +236,7 @@ final class GroupsModel {
     }
 
     func cachedRoster(for group: GroupSummary) -> CachedGroupRoster? {
-        guard account != nil, containsRosterGroup(group),
+        guard account != nil, containsGroup(group),
               let saved = snapshot.groupRosters?[group.id], saved.zoneOwner == group.zoneOwner else { return nil }
         return saved
     }
@@ -251,7 +251,7 @@ final class GroupsModel {
         for group: GroupSummary, fetch: (String) async throws -> GroupRosterContents
     ) async throws -> GroupRosterContents {
         try Task.checkCancellation()
-        guard containsRosterGroup(group) else { throw GroupRosterError.accessLost }
+        guard containsGroup(group) else { throw GroupRosterError.accessLost }
         let request = UUID()
         rosterRequests[group.id] = request
         defer {
@@ -281,7 +281,7 @@ final class GroupsModel {
     ) async throws {
         guard generation == session else { throw GroupRepositoryError.accountChanged }
         try Task.checkCancellation()
-        guard containsRosterGroup(group) else { throw GroupRosterError.accessLost }
+        guard containsGroup(group) else { throw GroupRosterError.accessLost }
         guard rosterWrites[group.id] == nil else { throw GroupRosterError.writeInProgress }
         let request = UUID()
         rosterWrites[group.id] = request
@@ -323,7 +323,7 @@ final class GroupsModel {
             let result = try await operation(account)
             guard generation == started else { throw GroupRepositoryError.accountChanged }
             guard isCurrent() else { throw CancellationError() }
-            guard containsRosterGroup(group) else { throw GroupRosterError.accessLost }
+            guard containsGroup(group) else { throw GroupRosterError.accessLost }
             try apply(result)
             return result
         } catch {
@@ -332,15 +332,35 @@ final class GroupsModel {
             guard isCurrent() else { throw CancellationError() }
             if Self.isAccountLoss(error) {
                 invalidateAccount()
-            } else if (error as? GroupRosterError) == .accessLost, containsRosterGroup(group) {
+            } else if (error as? GroupRosterError) == .accessLost, containsGroup(group) {
                 removeCachedGroup(group.id)
             }
             throw error
         }
     }
 
-    private func containsRosterGroup(_ group: GroupSummary) -> Bool {
+    func containsGroup(_ group: GroupSummary) -> Bool {
         groups.contains { $0.id == group.id && $0.zoneOwner == group.zoneOwner && $0.isOwner == group.isOwner }
+    }
+
+    func withSharedGroup<Result>(
+        _ group: GroupSummary, session: UUID? = nil,
+        operation: (GroupRepository, String) async throws -> Result
+    ) async throws -> Result {
+        if let session, session != generation { throw GroupRepositoryError.accountChanged }
+        try Task.checkCancellation()
+        guard containsGroup(group) else { throw GroupRosterError.accessLost }
+        return try await withRosterSession(for: group, operation: { account in
+            do {
+                let result = try await operation(self.repository, account)
+                try await self.repository.verifyAccount(account)
+                return result
+            } catch where Self.isAccessLoss(error) {
+                // A missing game or child record alone does not establish loss of membership.
+                _ = try await self.repository.roster(for: group, account: account).authorize()
+                throw error
+            }
+        }, isCurrent: { !Task.isCancelled }) { _ in }
     }
 
     private func saveRoster(_ players: [CachedGroupRoster.Player], for group: GroupSummary) {

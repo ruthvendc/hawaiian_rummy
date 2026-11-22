@@ -1,5 +1,6 @@
 #if DEBUG
 import Network
+import SwiftData
 import SwiftUI
 
 struct GroupPlayersView: View {
@@ -19,6 +20,7 @@ struct GroupPlayersView: View {
     @State private var renameName = ""
     @State private var retiring: GroupPlayerIdentity?
     @State private var showingRetired = false
+    @State private var showingPersonalCopy = false
 
     private var saved: CachedGroupRoster? { model.cachedRoster(for: group) }
     private var canConnect: Bool { scenePhase == .active && hasConnection == true }
@@ -76,6 +78,15 @@ struct GroupPlayersView: View {
         .sheet(item: $renaming) { original in
             renameForm(original)
         }
+        .sheet(isPresented: $showingPersonalCopy, onDismiss: { actionIssue = nil }) {
+            GroupPersonalPlayerCopyView(
+                canCopy: canAdd, isSaving: isSaving, issue: actionIssue,
+                conflict: { name, id in nameConflict(name, excluding: id) },
+                copy: { draft in
+                    await perform(.add(draft)) { showingPersonalCopy = false }
+                }
+            )
+        }
         .alert("Retire player?", isPresented: Binding(
             get: { retiring != nil },
             set: { if !$0 { retiring = nil } }
@@ -109,6 +120,11 @@ struct GroupPlayersView: View {
             .disabled(!canAdd)
             .listRowInsets(EdgeInsets(top: 14, leading: 16, bottom: 18, trailing: 16))
             if let addConflict { statusText(addConflict) }
+            Button("Copy a Personal Player", systemImage: "person.crop.circle.badge.plus") {
+                actionIssue = nil
+                showingPersonalCopy = true
+            }
+            .disabled(!canAdd)
         }
     }
 
@@ -306,6 +322,89 @@ struct GroupPlayersView: View {
     private struct RefreshContext: Equatable {
         let canConnect: Bool
         let session: UUID
+    }
+}
+
+private struct GroupPersonalPlayerCopyView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.personalDeletionTargets) private var deletionTargets
+    @Query(sort: \PlayerProfile.name) private var storedPlayers: [PlayerProfile]
+    @State private var selectedID: UUID?
+    @State private var draft: GroupPlayerDraft?
+
+    let canCopy: Bool
+    let isSaving: Bool
+    let issue: String?
+    let conflict: (String, UUID) -> String?
+    let copy: (GroupPlayerDraft) async -> Void
+
+    private var players: [PlayerProfile] { storedPlayers.filter { !deletionTargets.players.contains($0.id) } }
+    private var duplicate: String? { draft.flatMap { conflict($0.displayName, $0.id) } }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if players.isEmpty {
+                        Text("No personal players").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(PlayerProfile.orderedActivePlayers(players)) { player in
+                            personalPlayerRow(player)
+                        }
+                    }
+                } footer: {
+                    Text("Copies the name to this group. The personal player and their scores stay in your personal history.")
+                }
+                let retiredPlayers = players.filter(\.isRetired)
+                if !retiredPlayers.isEmpty {
+                    Section {
+                        DisclosureGroup("Retired Personal Players") {
+                            ForEach(retiredPlayers) { player in personalPlayerRow(player) }
+                        }
+                    }
+                }
+                if isSaving { ProgressView("Copying player…") }
+                if let duplicate { Text(duplicate).foregroundStyle(.secondary) }
+                else if let issue { Text(issue).foregroundStyle(.secondary) }
+                if !canCopy && !isSaving {
+                    Text("Connect to iCloud to copy a player.").foregroundStyle(.secondary)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color.softPurpleBackground)
+            .navigationTitle("Copy Personal Player")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Copy") {
+                        guard let draft else { return }
+                        Task { await copy(draft) }
+                    }
+                    .disabled(!canCopy || isSaving || draft == nil || duplicate != nil ||
+                              !players.contains(where: { $0.id == selectedID }))
+                }
+            }
+        }
+        .interactiveDismissDisabled(isSaving)
+    }
+
+    private func personalPlayerRow(_ player: PlayerProfile) -> some View {
+        Button {
+            guard selectedID != player.id else { return }
+            selectedID = player.id
+            draft = GroupPlayerDraft(id: UUID(), displayName: player.name)
+        } label: {
+            HStack {
+                Text(player.name).foregroundStyle(.primary)
+                Spacer()
+                if selectedID == player.id { Image(systemName: "checkmark") }
+            }
+        }
+        .accessibilityAddTraits(selectedID == player.id ? .isSelected : [])
+        .disabled(isSaving)
     }
 }
 #endif

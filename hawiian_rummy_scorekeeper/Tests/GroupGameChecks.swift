@@ -8,6 +8,7 @@ struct GroupGameChecks {
         try await staleAndFailedWrites()
         try await lostAcknowledgmentsAndAccess()
         try await retryVerificationPreflight()
+        try await historyAndSelection()
         print("Group game checks passed (simulated CloudKit transport).")
     }
 
@@ -207,6 +208,50 @@ struct GroupGameChecks {
         } catch {
             try check(error.localizedDescription.contains("BLOCKED for retry") && fixture.transport.commits == afterRetry,
                       "An advanced game rejects a repeated retry probe before writing")
+        }
+    }
+
+    private static func historyAndSelection() async throws {
+        let fixture = Fixture()
+        let owner = fixture.games(.owner, account: "owner")
+        let member = fixture.games(.editor, account: "member")
+        let ownerGame = fixture.creation()
+        _ = try await owner.perform(ownerGame)
+
+        var selection = GroupGameSelection()
+        let first = fixture.playerIDs[0]
+        let second = fixture.playerIDs[1]
+        selection.select(second, isSelected: true)
+        try check(!selection.canStart, "A group game needs at least two distinct players")
+        selection.select(second, isSelected: true)
+        selection.select(first, isSelected: true)
+        try check(selection.canStart && selection.playerIDs == [second, first], "Selection follows tap order without duplicates")
+        selection.select(second, isSelected: false)
+        selection.select(second, isSelected: true)
+        try check(selection.playerIDs == [first, second], "Reselecting moves the player to the end")
+        selection.retainActivePlayers([fixture.players[0]])
+        try check(selection.playerIDs == [second] && !selection.canStart, "Refreshing removes unavailable players")
+        selection.select(first, isSelected: true)
+        let memberGame = GroupGameOperation.create(
+            groupID: fixture.id, gameID: UUID(), playerIDs: selection.playerIDs
+        )
+        _ = try await member.perform(memberGame)
+
+        let headers = fixture.transport.records.values.filter { GroupGameStore.gameUUID($0.record.recordID) != nil }
+        try check(headers.count == 2, "Game IDs exclude round and operation records")
+        let listed = try await member.list { Array(headers) }
+        let ownerListed = try await owner.list { Array(headers) }
+        try check(listed == ownerListed && Set(listed.map(\.id)) == Set([ownerGame.gameID, memberGame.gameID]),
+                  "Owner and member history both include games created by other members")
+        try check(listed.first { $0.id == memberGame.gameID }?.participants.map(\.playerID) == [second, first],
+                  "History preserves the selected seating order")
+        let inaccessible = fixture.games(authorize: { throw GroupRosterError.accessLost })
+        try await expect(GroupRosterError.accessLost, "Revoked membership cannot load game history") {
+            _ = try await inaccessible.list { throw Failure("A denied request reached the fetch") }
+        }
+        let otherGroup = Fixture().games(.owner, account: "owner")
+        try await expect(GroupGameError.invalidRecord, "History rejects headers from another group zone") {
+            _ = try await otherGroup.list { Array(headers) }
         }
     }
 

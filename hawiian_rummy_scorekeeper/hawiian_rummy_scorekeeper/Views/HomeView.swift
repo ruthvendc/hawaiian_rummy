@@ -6,6 +6,9 @@ struct HomeView: View {
     @Environment(\.personalDeletionTargets) private var deletionTargets
     @State private var showingNewGame = false
     @State private var gameToOpen: Game?
+    #if DEBUG
+    @State private var groupGameToOpen: GroupGameRoute?
+    #endif
 
     private var activeGame: Game? { games.first { !$0.isComplete && !deletionTargets.games.contains($0.id) } }
 
@@ -79,13 +82,27 @@ struct HomeView: View {
             .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(for: Game.self) { GameDetailView(game: $0) }
             .navigationDestination(item: $gameToOpen) { GameDetailView(game: $0) }
+            #if DEBUG
+            .navigationDestination(item: $groupGameToOpen) { game in
+                GroupGameDetailView(route: game, model: .shared)
+            }
+            #endif
             .sheet(isPresented: $showingNewGame) {
-                NewGameView { game in
+                #if DEBUG
+                NewGameView(onStart: openPersonalGame, onStartGroup: { game in
                     showingNewGame = false
-                    gameToOpen = game
-                }
+                    groupGameToOpen = game
+                })
+                #else
+                NewGameView(onStart: openPersonalGame)
+                #endif
             }
         }
+    }
+
+    private func openPersonalGame(_ game: Game) {
+        showingNewGame = false
+        gameToOpen = game
     }
 }
 

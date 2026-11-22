@@ -1,6 +1,6 @@
 import Foundation
 
-struct GroupSummary: Codable, Identifiable, Equatable {
+struct GroupSummary: Codable, Identifiable, Hashable {
     let id: UUID
     let zoneOwner: String
     let name: String

@@ -55,6 +55,31 @@ struct GroupGameSnapshot: Equatable {
     let rounds: [GroupGameRound]
 }
 
+struct GroupGameRoute: Hashable {
+    let group: GroupSummary
+    let gameID: UUID
+}
+
+struct GroupGameSelection {
+    static let minimumPlayers = 2
+    private(set) var playerIDs: [UUID] = []
+
+    var canStart: Bool { playerIDs.count >= Self.minimumPlayers }
+
+    mutating func select(_ id: UUID, isSelected: Bool) {
+        if isSelected {
+            if !playerIDs.contains(id) { playerIDs.append(id) }
+        } else {
+            playerIDs.removeAll { $0 == id }
+        }
+    }
+
+    mutating func retainActivePlayers(_ roster: [GroupPlayerIdentity]) {
+        let active = Set(roster.filter { $0.retiredAt == nil }.map(\.id))
+        playerIDs.removeAll { !active.contains($0) }
+    }
+}
+
 // Keep the entire command, including its original version and ID, for retries.
 struct GroupGameOperation: Codable {
     enum Action: Codable {
