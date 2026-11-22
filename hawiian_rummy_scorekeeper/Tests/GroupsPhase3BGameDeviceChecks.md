@@ -1,5 +1,34 @@
 # Phase 3B Increment 1 — Shared game storage
 
+## Recorded Increment 1 results
+
+The owner reported all seven checks passed in CloudKit Development on two
+physical iPhones signed in to separate Apple Accounts. The original
+`Game-Verification-3B1` group and both games were retained.
+
+| Check | Result |
+| --- | --- |
+| Owner creation | PASS — The owner created the game, first round and receipt through the private database. |
+| Member creation | PASS — The approved member created the same record types through the shared database. |
+| Cross-account visibility | PASS — Both phones read both games. |
+| Scores and permissions | PASS — Each scorekeeper wrote their own scores. App-level checks rejected changes by the other account. |
+| Atomic rollback | PASS — The stale batch left neither hand 2 nor a receipt. The member game reached completed revision 3. |
+| Ambiguous save and retry | PASS — The original Xcode console result confirmed recovery of revision 4's receipt and preservation of revision 5 and its scores. |
+| Membership revocation | PASS — Phone B lost access. Phone A retained both games and their scores. |
+
+Xcode's launch reports showed two `retry` launches on Phone B. The later
+revision-3 preflight failure was consistent with an already-advanced game.
+The read-only `retry-status` found completed revision 5 with one hand scored
+21 and 21. Receipts 05/06/07/08 were
+`verified/missing/verified/verified`. The owner recovered the original
+`PASS retry` from Xcode's Report Navigator, which established the recovery
+result in addition to the persisted readback.
+
+Final owner readback showed the owner game at revision 2, in progress,
+with one round and first-hand scores of 3 and 3. The member game was
+complete at revision 5, with one round and first-hand scores of 21 and 21.
+The shared Run scheme no longer supplies verification arguments.
+
 ## Approved design
 
 - Copying a personal player into a group is a prerequisite for the game
