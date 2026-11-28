@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 #if DEBUG
 import CloudKit
+import Network
 
 extension GroupsModel {
     static let shared = GroupsModel(containerIdentifier: hawiian_rummy_scorekeeperApp.cloudKitContainerID)
@@ -44,6 +45,13 @@ struct ContentView: View {
             #endif
         }
         #if DEBUG
+        .task {
+            let monitor = NWPathMonitor()
+            for await path in monitor {
+                groups.updateDiscoveryPath(available: path.status == .satisfied)
+                Task { await groups.refresh() }
+            }
+        }
         .task(id: shouldPollInvitations) {
             guard shouldPollInvitations else { return }
             var delay = 8

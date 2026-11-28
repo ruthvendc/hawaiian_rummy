@@ -154,6 +154,9 @@ final class GroupGameScoring {
     }
 
     func discardInaccessibleGame() {
+        if detail != nil || saved != nil {
+            GroupAccountLaunchDiagnostic.activeTrace?.record("Open scorecard cleared from memory · \(accessLost ? "access lost reported" : "verified account or cached group scope unavailable")")
+        }
         detail = nil
         draft = nil
         saved = nil
@@ -411,6 +414,7 @@ final class GroupGameScoring {
         } catch is CancellationError {
             return
         } catch {
+            GroupAccountLaunchDiagnostic.activeTrace?.record("Group game read failed · \(GroupAccountLaunchDiagnostic.errorCode(error))")
             if Self.hidesLocalGame(error) { flagLocalChange(in: local, hide: true) }
             guard handleAccess(error), !Task.isCancelled else { return }
             switch error {
@@ -430,7 +434,9 @@ final class GroupGameScoring {
         guard let local else { return }
         do {
             saved = try local.flagForReview(operationID: operationID, hide: hide)
+            if let saved { GroupAccountLaunchDiagnostic.activeTrace?.recordJournal(saved, outcome: "after access or game-state error") }
         } catch {
+            GroupAccountLaunchDiagnostic.activeTrace?.record("Couldn’t record journal review or eligibility after a game error")
             loadIssue = "Couldn’t update the local scoring journal."
         }
         showsLocalScorecard = false

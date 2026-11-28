@@ -70,7 +70,7 @@ enum GroupMembershipChange {
 
 enum GroupRepositoryError: LocalizedError {
     case accountChanged, unavailable, accountTemporarilyUnavailable
-    case invalidGroup, invalidLink, approvalRequired, ownerRequired, requestChanged
+    case invalidGroup, groupScopeUnavailable, invalidLink, approvalRequired, ownerRequired, requestChanged
     case memberNameNotWritable, memberNameInvalid
 
     var errorDescription: String? {
@@ -79,6 +79,7 @@ enum GroupRepositoryError: LocalizedError {
         case .unavailable: "Sign in to iCloud to use Groups."
         case .accountTemporarilyUnavailable: "Couldn’t verify your iCloud account. Check your connection and try again."
         case .invalidGroup: "This group is unavailable or uses an unsupported format."
+        case .groupScopeUnavailable: "Couldn’t verify access to this group. Refresh Groups and try again."
         case .invalidLink: "Enter a Hawaiian Rummy group invitation link."
         case .approvalRequired: "The owner must approve your request before you can join."
         case .ownerRequired: "Only the group owner can do this."
@@ -86,6 +87,32 @@ enum GroupRepositoryError: LocalizedError {
         case .memberNameNotWritable: "You can only change your own display name while you have access to this group."
         case .memberNameInvalid: "Use one line of up to \(GroupMemberDisplayName.maximumLength) characters."
         }
+    }
+}
+
+struct GroupDiscoveryResult {
+    let groups: [GroupSummary]
+    var skippedRoots = 0
+
+    // The list alone cannot prove that a previously cached scope has disappeared.
+    func reconcile(
+        cached: [GroupSummary], confirmRemoval: (GroupSummary) async throws -> Bool,
+        trace: GroupAccountLaunchDiagnostic.RefreshTrace?
+    ) async throws -> (groups: [GroupSummary], incomplete: Bool) {
+        let byID = Dictionary(grouping: groups, by: \.id)
+        let found = groups.filter { byID[$0.id]?.count == 1 }
+        let scopes = Set(found.map(\.scope))
+        var retained: [GroupSummary] = []
+        for group in cached where !scopes.contains(group.scope) {
+            let scope = group.isOwner ? "Private" : "Shared"
+            let target = trace?.isTarget(group.id) == true ? " · test group" : ""
+            let removed = try await confirmRemoval(group)
+            if !removed { retained.append(group) }
+            trace?.record("\(scope) omitted scope\(target) · \(removed ? "removal confirmed" : "cached scope retained")")
+        }
+        let retainedIDs = Set(retained.map(\.id))
+        return (found.filter { !retainedIDs.contains($0.id) } + retained,
+                skippedRoots > 0 || found.count != groups.count || !retained.isEmpty)
     }
 }
 
@@ -127,12 +154,26 @@ struct GroupRepository {
         guard try await accountID() == account else { throw GroupRepositoryError.accountChanged }
     }
 
-    func discover() async throws -> [GroupSummary] {
-        async let owned = discover(in: container.privateCloudDatabase, isOwner: true)
-        async let joined = discover(in: container.sharedCloudDatabase, isOwner: false)
-        return try await (owned + joined).sorted {
+    func discover() async throws -> [GroupSummary] { try await discoverGroups().groups }
+
+    func discoverGroups(trace: GroupAccountLaunchDiagnostic.RefreshTrace? = nil) async throws -> GroupDiscoveryResult {
+        async let owned = discover(in: container.privateCloudDatabase, isOwner: true, trace: trace)
+        async let joined = discover(in: container.sharedCloudDatabase, isOwner: false, trace: trace)
+        let results = try await (owned, joined)
+        let (privateResult, sharedResult) = results
+        let groups = (privateResult.groups + sharedResult.groups).sorted {
             let order = $0.name.localizedStandardCompare($1.name)
             return order == .orderedSame ? $0.id.uuidString < $1.id.uuidString : order == .orderedAscending
+        }
+        return GroupDiscoveryResult(groups: groups, skippedRoots: privateResult.skippedRoots + sharedResult.skippedRoots)
+    }
+
+    func confirmGroupRemoval(_ group: GroupSummary, account: String) async throws -> Bool {
+        do {
+            _ = try await verifiedMembership(for: group, account: account)
+            return false
+        } catch GroupRosterError.accessLost {
+            return true
         }
     }
 
@@ -209,9 +250,21 @@ struct GroupRepository {
 
     private func groupShare(for group: GroupSummary) async throws -> (CKRecord, CKShare?) {
         let database = database(for: group)
-        let root = try await database.record(for: rootID(for: group))
-        guard let shareID = root.share?.recordID else { return (root, nil) }
-        return (root, try await database.record(for: shareID) as? CKShare)
+        let trace = GroupAccountLaunchDiagnostic.activeTrace
+        let scope = group.isOwner ? "Private" : "Shared"
+        var stage = "group root fetch"
+        do {
+            let root = try await database.record(for: rootID(for: group))
+            guard let shareID = root.share?.recordID else {
+                trace?.record("\(scope) group root has no share · test group \(trace?.isTarget(group.id) == true ? "yes" : "unknown or other")")
+                return (root, nil)
+            }
+            stage = "share fetch"
+            return (root, try await database.record(for: shareID) as? CKShare)
+        } catch {
+            trace?.record("\(scope) \(stage) failed · \(GroupAccountLaunchDiagnostic.errorCode(error)) · test group \(trace?.isTarget(group.id) == true ? "yes" : "unknown or other")")
+            throw error
+        }
     }
 
     func roster(for group: GroupSummary, account: String) -> GroupRoster {
@@ -248,7 +301,7 @@ struct GroupRepository {
         let fetchedShare: CKShare?
         do {
             (root, fetchedShare) = try await groupShare(for: group)
-        } catch where GroupsModel.isAccessLoss(error) {
+        } catch where Self.isConfirmedGroupAbsence(error) {
             try await verifyAccount(account)
             throw GroupRosterError.accessLost
         }
@@ -270,6 +323,12 @@ struct GroupRepository {
         let role: GroupRosterAccess.Role = isOwner ? .owner : participant.permission == .readWrite ? .editor : .reader
         return (share, GroupRosterAccess(role: role, groupID: group.id, account: account,
                                         participantID: participant.participantID))
+    }
+
+    // Use only for errors from a direct lookup of the expected group root or share.
+    static func isConfirmedGroupAbsence(_ error: Error) -> Bool {
+        guard let code = (error as? CKError)?.code else { return false }
+        return [.zoneNotFound, .unknownItem, .permissionFailure].contains(code)
     }
 
     func loadMemberDisplayNames(in details: GroupDetails, account: String) async -> GroupDetails {
@@ -486,26 +545,64 @@ struct GroupRepository {
         return groupID
     }
 
-    private func discover(in database: CKDatabase, isOwner: Bool) async throws -> [GroupSummary] {
-        let zones = try await database.allRecordZones()
+    private func discover(
+        in database: CKDatabase, isOwner: Bool, trace: GroupAccountLaunchDiagnostic.RefreshTrace?
+    ) async throws -> GroupDiscoveryResult {
+        let scope = isOwner ? "Private" : "Shared"
+        let zones: [CKRecordZone]
+        do {
+            trace?.record("\(scope) zone list started")
+            zones = try await database.allRecordZones()
+        } catch {
+            trace?.record("\(scope) zone list failed · \(GroupAccountLaunchDiagnostic.errorCode(error))")
+            throw error
+        }
+        if let trace {
+            let groupIDs = zones.compactMap { Self.groupID(in: $0.zoneID) }
+            let listed = trace.knowsTarget ? (groupIDs.contains(where: trace.isTarget) ? "yes" : "no") : "test group not identified yet"
+            trace.record("\(scope) zone list returned \(groupIDs.count) group zone(s) · test zone listed \(listed)")
+        }
         var groups: [GroupSummary] = []
-        for zone in zones where Self.groupID(in: zone.zoneID) != nil {
+        var skippedRoots = 0
+        for zone in zones {
+            guard let groupID = Self.groupID(in: zone.zoneID) else { continue }
             let id = CKRecord.ID(recordName: Self.rootName, zoneID: zone.zoneID)
+            var stage = "group root fetch"
             do {
-                if let root = try await existingRoot(id, in: database), root.share != nil {
-                    groups.append(try summary(for: root, isOwner: isOwner))
+                let root = try await existingRoot(id, in: database) { error in
+                    trace?.skipped("\(scope) group root fetch", groupID: groupID, reason: GroupAccountLaunchDiagnostic.errorCode(error))
                 }
-            } catch where !isOwner && GroupsModel.isAccessLoss(error) {
-                continue
+                if let root {
+                    if root.share != nil {
+                        stage = "group root validation"
+                        groups.append(try summary(for: root, isOwner: isOwner))
+                    } else {
+                        trace?.skipped("\(scope) group root", groupID: groupID, reason: "share reference absent")
+                    }
+                }
+                if root?.share == nil { skippedRoots += 1 }
+            } catch {
+                let reason = GroupAccountLaunchDiagnostic.errorCode(error)
+                if !isOwner && GroupsModel.isAccessLoss(error) {
+                    skippedRoots += 1
+                    trace?.skipped("\(scope) \(stage)", groupID: groupID, reason: reason)
+                    continue
+                }
+                trace?.record("\(scope) \(stage) failed · \(reason) · test group \(trace?.isTarget(groupID) == true ? "yes" : "unknown or other")")
+                throw error
             }
         }
-        return groups
+        trace?.record("\(scope) discovery returned · \(GroupAccountLaunchDiagnostic.groupSummary(groups))")
+        return GroupDiscoveryResult(groups: groups, skippedRoots: skippedRoots)
     }
 
-    private func existingRoot(_ id: CKRecord.ID, in database: CKDatabase) async throws -> CKRecord? {
+    private func existingRoot(
+        _ id: CKRecord.ID, in database: CKDatabase, onMissing: ((CKError) -> Void)? = nil
+    ) async throws -> CKRecord? {
         do {
             return try await database.record(for: id)
         } catch let error as CKError where error.code == .unknownItem || error.code == .zoneNotFound {
+            onMissing?(error)
             return nil
         }
     }
@@ -562,6 +659,37 @@ struct GroupRepository {
 @MainActor
 @Observable
 final class GroupAccountLaunchDiagnostic {
+    struct TraceEvent: Identifiable {
+        let id: Int
+        let text: String
+    }
+
+    final class RefreshTrace {
+        private let diagnostic: GroupAccountLaunchDiagnostic
+        private let number: Int
+        private var targetIDs: Set<UUID> = []
+
+        init(diagnostic: GroupAccountLaunchDiagnostic, number: Int) {
+            self.diagnostic = diagnostic
+            self.number = number
+        }
+
+        func identifyTarget(account: String, groups: [GroupSummary]) {
+            diagnostic.identifyTarget(account: account, groups: groups)
+            targetIDs = diagnostic.targetGroupIDs
+        }
+
+        var knowsTarget: Bool { !targetIDs.isEmpty }
+
+        func isTarget(_ id: UUID) -> Bool { targetIDs.contains(id) }
+
+        func skipped(_ stage: String, groupID: UUID, reason: String) {
+            record("\(stage) skipped · \(reason) · test group \(isTarget(groupID) ? "yes" : "unknown or other")")
+        }
+
+        func record(_ message: String) { diagnostic.record("Refresh \(number) · \(message)") }
+    }
+
     enum Mode: String, CaseIterable {
         case off, baseline, offline
 
@@ -609,6 +737,7 @@ final class GroupAccountLaunchDiagnostic {
     }
 
     static let shared = GroupAccountLaunchDiagnostic()
+    static var activeTrace: GroupAccountLaunchDiagnostic? { shared.mode == .off ? nil : shared }
     static let nextLaunchModeKey = "debug.groupAccountDiagnostic.nextLaunchMode"
     private static let baselineKey = "debug.groupAccountDiagnostic.baselineDigest"
     let mode: Mode
@@ -616,6 +745,11 @@ final class GroupAccountLaunchDiagnostic {
     private(set) var lookups: [Lookup: LookupResult] = [:]
     private(set) var comparison = "unknown"
     private(set) var cacheResult: CacheResult?
+    private(set) var traceEvents: [TraceEvent] = []
+    private var eventNumber = 0
+    private var refreshNumber = 0
+    private var targetGroupIDs: Set<UUID> = []
+    @ObservationIgnored private var journalNumbers: [UUID: Int] = [:]
     private let baseline: String?
     private var started = false
     private var lookupStarted = false
@@ -634,6 +768,63 @@ final class GroupAccountLaunchDiagnostic {
         if baselineRecorded { return "Recorded" }
         if mode == .baseline { return finished ? "Not recorded" : "Waiting for online verification" }
         return baseline == nil ? "Missing" : "Present"
+    }
+
+    func startRefresh(pendingOnly: Bool, groups: [GroupSummary]) -> RefreshTrace {
+        refreshNumber += 1
+        let trace = RefreshTrace(diagnostic: self, number: refreshNumber)
+        trace.record("\(pendingOnly ? "Invitation refresh" : "Groups refresh") started · memory \(Self.groupSummary(groups))")
+        return trace
+    }
+
+    private func identifyTarget(account: String, groups: [GroupSummary]) {
+        // Remember only the disposable test group's identity so a later launch can recognize
+        // its journal after the group disappears from the Groups cache.
+        let key = "debug.groupAccountDiagnostic.testGroups.\(Self.digest(account))"
+        let known = Set((UserDefaults.standard.stringArray(forKey: key) ?? []).compactMap(UUID.init(uuidString:)))
+        let current = Set(groups.filter { $0.name == Self.targetName }.map(\.id))
+        targetGroupIDs = known.union(current)
+        if targetGroupIDs != known {
+            UserDefaults.standard.set(targetGroupIDs.map(\.uuidString).sorted(), forKey: key)
+        }
+    }
+
+    func forgetTargetContext() { targetGroupIDs = [] }
+
+    var knowsTarget: Bool { !targetGroupIDs.isEmpty }
+
+    func isTarget(_ id: UUID) -> Bool { targetGroupIDs.contains(id) }
+
+    func recordJournal(_ entry: GroupGameJournal.Entry, outcome: String) {
+        let game = entry.scope.gameID
+        let number = journalNumbers[game] ?? journalNumbers.count + 1
+        journalNumbers[game] = number
+        record("Journal \(number) · \(isTarget(entry.scope.groupID) ? "test group" : "other or unidentified group") · eligible \(entry.isEligible ? "yes" : "no") · \(entry.operations.count) queued operation(s) · \(outcome)")
+    }
+
+    static let targetName = "Game-Verification-3B1"
+
+    static func groupSummary(_ groups: [GroupSummary]) -> String {
+        "\(groups.count) group(s) · test group \(groups.contains { $0.name == targetName } ? "present" : "absent")"
+    }
+
+    static func errorCode(_ error: Error) -> String {
+        if let cloud = error as? CKError {
+            let partial = Set((cloud.partialErrorsByItemID ?? [:]).values.compactMap { ($0 as? CKError)?.code.rawValue })
+            let details = partial.isEmpty ? "" : " · item codes \(partial.sorted().map(String.init).joined(separator: ", "))"
+            return "CKError(\(cloud.code.rawValue))\(details)"
+        }
+        if let repository = error as? GroupRepositoryError { return "\(repository)" }
+        if let roster = error as? GroupRosterError { return "\(roster)" }
+        if let game = error as? GroupGameError { return "\(game)" }
+        if error is CancellationError { return "Cancelled" }
+        return "Non-CloudKit error"
+    }
+
+    func record(_ message: String) {
+        eventNumber += 1
+        traceEvents.append(TraceEvent(id: eventNumber, text: message))
+        if traceEvents.count > 160 { traceEvents.removeFirst(traceEvents.count - 160) }
     }
 
     func begin() -> GroupAccountLaunchDiagnostic? {

@@ -1,10 +1,18 @@
 import Foundation
 
 struct GroupSummary: Codable, Identifiable, Hashable {
+    struct Scope: Hashable {
+        let id: UUID
+        let zoneOwner: String
+        let isOwner: Bool
+    }
+
     let id: UUID
     let zoneOwner: String
     let name: String
     let isOwner: Bool
+
+    var scope: Scope { Scope(id: id, zoneOwner: zoneOwner, isOwner: isOwner) }
 }
 
 // CloudKit record types used by the group repository.

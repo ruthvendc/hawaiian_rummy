@@ -20,7 +20,7 @@ struct GroupsView: View {
                 }
                 NavigationLink("Resume Group Game") { ResumableGroupGamesView(model: model) }
                 NavigationLink("Account Diagnostic") {
-                    GroupAccountDiagnosticView()
+                    GroupAccountDiagnosticView(model: model)
                 }
                 if let issue = model.refreshIssue {
                     Section {
@@ -86,6 +86,11 @@ struct GroupsView: View {
 }
 
 private struct ResumableGroupGamesView: View {
+    private struct LoadKey: Equatable {
+        let account: String?
+        let scopes: Set<GroupSummary.Scope>
+    }
+
     let model: GroupsModel
     @State private var items: [GroupGameJournal.ResumeItem] = []
     @State private var loadedAccount: String?
@@ -117,8 +122,22 @@ private struct ResumableGroupGamesView: View {
             }
         }
         .navigationTitle("Resume Group Game")
-        .task(id: model.scoringAccount) { load() }
+        .task(id: LoadKey(account: model.scoringAccount, scopes: Set(model.groups.map(\.scope)))) { load() }
         .refreshable { load() }
+        .onChange(of: visibilityTrace(visible), initial: true) { _, message in
+            if let message { GroupAccountLaunchDiagnostic.activeTrace?.record(message) }
+        }
+    }
+
+    private func visibilityTrace(_ visible: [GroupGameJournal.ResumeItem]) -> String? {
+        guard let trace = GroupAccountLaunchDiagnostic.activeTrace else { return nil }
+        guard model.scoringAccount != nil else { return "Resume screen · scoring identity unresolved" }
+        guard loadedAccount == model.scoringAccount else { return "Resume screen · waiting for the current account’s journals" }
+        guard !loadFailed else { return "Resume screen · local store read failed" }
+        let testInResults = items.contains { trace.isTarget($0.route.group.id) }
+        let testVisible = visible.contains { trace.isTarget($0.route.group.id) }
+        let outcome = if testVisible { "visible" } else if testInResults { "excluded by screen · group scope no longer matches memory" } else { "absent from the last journal scan" }
+        return "Resume screen · showing \(visible.count) of \(items.count) loaded row(s) · test group \(outcome) · memory \(GroupAccountLaunchDiagnostic.groupSummary(model.groups))"
     }
 
     private func load() {
@@ -134,9 +153,11 @@ private struct ResumableGroupGamesView: View {
 }
 
 private struct GroupAccountDiagnosticView: View {
+    let model: GroupsModel
     @AppStorage(GroupAccountLaunchDiagnostic.nextLaunchModeKey)
     private var nextLaunchMode: GroupAccountLaunchDiagnostic.Mode = .off
     private let diagnostic = GroupAccountLaunchDiagnostic.shared
+    @State private var diskCacheSummary = "Checking…"
 
     var body: some View {
         List {
@@ -147,6 +168,21 @@ private struct GroupAccountDiagnosticView: View {
                 LabeledContent("Online Baseline", value: diagnostic.baselineStatus)
                 LabeledContent("Account Comparison", value: diagnostic.comparison)
                 LabeledContent("Groups Cache", value: diagnostic.cacheResult?.title ?? "Not checked yet")
+            }
+            if diagnostic.mode != .off {
+                Section("Current Groups State") {
+                    LabeledContent("In Memory", value: GroupAccountLaunchDiagnostic.groupSummary(model.groups))
+                    LabeledContent("Disk Cache on Read", value: diskCacheSummary)
+                }
+                Section {
+                    ForEach(diagnostic.traceEvents) { event in
+                        Text("\(event.id). \(event.text)").font(.footnote).textSelection(.enabled)
+                    }
+                } header: {
+                    Text("Groups and Journal Trace")
+                } footer: {
+                    Text("Open Resume Group Game to capture the journal scan. The trace follows Game-Verification-3B1 and resets on relaunch.")
+                }
             }
             Section {
                 Picker("Mode", selection: $nextLaunchMode) {
@@ -164,6 +200,12 @@ private struct GroupAccountDiagnosticView: View {
         }
         .navigationTitle("Account Diagnostic")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: model.scoringAccount) {
+            if diagnostic.mode != .off { diskCacheSummary = model.diagnosticDiskCacheSummary() }
+        }
+        .onChange(of: model.groups) { _, _ in
+            if diagnostic.mode != .off { diskCacheSummary = model.diagnosticDiskCacheSummary() }
+        }
     }
 
     @ViewBuilder private func lookup(_ stage: GroupAccountLaunchDiagnostic.Lookup, title: String) -> some View {

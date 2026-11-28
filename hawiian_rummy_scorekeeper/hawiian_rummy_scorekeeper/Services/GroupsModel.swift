@@ -15,11 +15,18 @@ enum GroupRosterChange {
 
 @Observable
 final class GroupsModel {
+    private enum DiscoveryInterrupted: LocalizedError {
+        case contextChanged
+
+        var errorDescription: String? { "Groups discovery was interrupted. Showing saved groups where available." }
+    }
+
     @ObservationIgnored private lazy var repository = GroupRepository(containerIdentifier: containerIdentifier)
     @ObservationIgnored private lazy var cache = try? GroupCache(url: cacheURL)
     @ObservationIgnored private var scoringJournal: GroupGameJournal?
     private let containerIdentifier: String
     private let cacheURL: URL?
+    private let journalURL: URL?
 
     private(set) var account: String?
     private(set) var scoringAccount: String?
@@ -35,6 +42,10 @@ final class GroupsModel {
     private var invitationStates: [String: PendingInvitationState] = [:]
     private var retryInvitationAfter: [String: Date] = [:]
     private var nativeRefreshQueued = false
+    private var discoveryRefreshQueued = false
+    private var discoveryPathAvailable: Bool?
+    private var discoveryPathGeneration = UUID()
+    private var groupCacheGeneration = UUID()
     var actionIssue: String?
 
     private var generation = UUID()
@@ -44,9 +55,17 @@ final class GroupsModel {
     var groups: [GroupSummary] { snapshot.groups }
     var accountGeneration: UUID { generation }
 
-    init(containerIdentifier: String, cacheURL: URL? = nil) {
+    init(containerIdentifier: String, cacheURL: URL? = nil, journalURL: URL? = nil) {
         self.containerIdentifier = containerIdentifier
         self.cacheURL = cacheURL
+        self.journalURL = journalURL
+    }
+
+    func updateDiscoveryPath(available: Bool) {
+        discoveryPathAvailable = available
+        discoveryPathGeneration = UUID()
+        discoveryRefreshQueued = true
+        if !available { isStale = !groups.isEmpty }
     }
 
     func receive(_ metadata: CKShare.Metadata) -> Bool {
@@ -71,6 +90,7 @@ final class GroupsModel {
         isRefreshing = false
         isWorking = false
         isStale = !groups.isEmpty
+        GroupAccountLaunchDiagnostic.activeTrace?.record("Account notification · scoring identity awaiting verification · memory kept \(GroupAccountLaunchDiagnostic.groupSummary(groups))")
     }
 
     func refresh() async {
@@ -84,32 +104,44 @@ final class GroupsModel {
     private func synchronizeGroups(pendingOnly: Bool = false) async {
         guard !isRefreshing, !isWorking else { return }
         repeat {
+            let invitationsOnly = pendingOnly && !discoveryRefreshQueued
             nativeRefreshQueued = false
-            let diagnostic = pendingOnly ? nil : GroupAccountLaunchDiagnostic.shared.begin()
+            discoveryRefreshQueued = false
+            let diagnostic = invitationsOnly ? nil : GroupAccountLaunchDiagnostic.shared.begin()
+            let trace = GroupAccountLaunchDiagnostic.activeTrace?.startRefresh(pendingOnly: invitationsOnly, groups: groups)
             await refresh(
                 accountID: { try await self.repository.accountID(diagnostic: diagnostic?.takeInitialLookup()) },
-                discover: { try await self.repository.discover() },
+                discover: { try await self.repository.discoverGroups(trace: trace) },
+                confirmRemoval: { group, account in try await self.repository.confirmGroupRemoval(group, account: account) },
                 resolveInvitation: { url, account in
                     let metadata = try await self.repository.invitationMetadata(for: url)
                     return try await self.repository.accept(metadata, account: account)
                 },
-                pendingOnly: pendingOnly,
-                diagnostic: diagnostic
+                pendingOnly: invitationsOnly,
+                diagnostic: diagnostic,
+                trace: trace
             )
-        } while nativeRefreshQueued && !Task.isCancelled && !isWorking && !isRefreshing
+        } while (nativeRefreshQueued || discoveryRefreshQueued) && !Task.isCancelled && !isWorking && !isRefreshing
     }
 
     func refresh(
         accountID: () async throws -> String,
-        discover: () async throws -> [GroupSummary],
+        discover: () async throws -> GroupDiscoveryResult,
+        confirmRemoval: (GroupSummary, String) async throws -> Bool = { _, _ in false },
         resolveInvitation: ((URL, String) async throws -> UUID)? = nil,
         pendingOnly: Bool = false,
-        diagnostic: GroupAccountLaunchDiagnostic? = nil
+        diagnostic: GroupAccountLaunchDiagnostic? = nil,
+        trace: GroupAccountLaunchDiagnostic.RefreshTrace? = nil
     ) async {
         guard !isRefreshing, !isWorking else { return }
-        defer { diagnostic?.finish() }
         var started = generation
+        defer {
+            if generation == started { isRefreshing = false }
+            diagnostic?.finish()
+            trace?.record("Refresh ended · memory \(GroupAccountLaunchDiagnostic.groupSummary(groups)) · scoring identity \(scoringAccount == nil ? "unresolved" : "resolved")")
+        }
         var resolvingAccount = true
+        var stage = "initial account lookup"
         isRefreshing = true
         do {
             let verified = try await accountID()
@@ -128,20 +160,32 @@ final class GroupsModel {
                     if let cache {
                         snapshot = try cache.load(account: verified)
                         diagnostic?.reportCache(.read(groupsPresent: !snapshot.groups.isEmpty))
+                        trace?.record("Resolved account · disk cache read · \(GroupAccountLaunchDiagnostic.groupSummary(groups))")
                     } else {
                         diagnostic?.reportCache(.unavailable)
+                        trace?.record("Resolved account · disk cache unavailable")
                     }
                     snapshot.pendingLinks = Self.uniqueInvitationLinks(snapshot.pendingLinks)
                     cacheIssue = cache == nil ? "Groups could not open its local cache." : nil
                 } catch {
                     diagnostic?.reportCache(.failed)
+                    trace?.record("Resolved account · disk cache read failed")
                     cacheIssue = "Groups could not read its local cache."
                 }
             } else {
                 diagnostic?.reportCache(.reusedInMemory)
+                trace?.record("Resolved account · reused memory · \(GroupAccountLaunchDiagnostic.groupSummary(groups))")
             }
             scoringAccount = verified
+            trace?.identifyTarget(account: verified, groups: groups)
             refreshIssue = nil
+            guard discoveryPathAvailable == true else {
+                isStale = !groups.isEmpty
+                trace?.record("Discovery skipped · network path unavailable or unobserved · memory and disk cache kept")
+                return
+            }
+            let path = discoveryPathGeneration
+            stage = "invitation resolution"
             let resolved: [String: UUID]
             if let resolveInvitation {
                 resolved = try await resolveInvitations(account: verified, generation: started, resolve: resolveInvitation)
@@ -150,23 +194,48 @@ final class GroupsModel {
             }
             guard generation == started else { return }
             if pendingOnly && resolved.isEmpty {
-                isRefreshing = false
+                trace?.record("Discovery skipped · no invitation resolved")
                 return
             }
-            let groups = try await discover()
+            let membership = groupCacheGeneration
+            func requireCurrentDiscovery() throws {
+                try Task.checkCancellation()
+                guard generation == started, discoveryPathIsCurrent(path), groupCacheGeneration == membership else {
+                    throw DiscoveryInterrupted.contextChanged
+                }
+            }
+            try requireCurrentDiscovery()
+            stage = "group discovery"
+            trace?.record("Before discovery · memory \(GroupAccountLaunchDiagnostic.groupSummary(self.groups))")
+            let discovered = try await discover()
+            trace?.record("Discovery returned · \(GroupAccountLaunchDiagnostic.groupSummary(discovered.groups)) · \(discovered.skippedRoots) skipped root(s) · memory still \(GroupAccountLaunchDiagnostic.groupSummary(self.groups))")
+            try requireCurrentDiscovery()
+            stage = "verification of omitted groups"
+            let result = try await discovered.reconcile(cached: groups, confirmRemoval: { group in
+                try requireCurrentDiscovery()
+                do {
+                    return try await confirmRemoval(group, verified)
+                } catch where !Self.isAccountLoss(error) && !(error is CancellationError) {
+                    trace?.record("Omitted group verification inconclusive · \(GroupAccountLaunchDiagnostic.errorCode(error))")
+                    return false
+                }
+            }, trace: trace)
+            try requireCurrentDiscovery()
             resolvingAccount = true
+            stage = "account recheck after discovery"
             guard try await accountID() == verified else { throw GroupRepositoryError.accountChanged }
             guard generation == started else { return }
             resolvingAccount = false
+            try requireCurrentDiscovery()
+            let groups = result.groups
             let visible = Set(groups.map(\.id))
-            let previous = Dictionary(snapshot.groups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            let sameScope = Set(groups.filter { group in
-                previous[group.id]?.zoneOwner == group.zoneOwner && previous[group.id]?.isOwner == group.isOwner
-            }.map(\.id))
+            let previousScopes = Set(snapshot.groups.map(\.scope))
+            let sameScope = Set(groups.filter { previousScopes.contains($0.scope) }.map(\.id))
+            trace?.record("Applying \(result.incomplete ? "partial" : "verified") discovery · \(previousScopes.count - sameScope.count) cached scope(s) removed after verification")
+            if snapshot.groups != groups { groupCacheGeneration = UUID() }
             snapshot.groups = groups
-            snapshot.groupDetails = snapshot.groupDetails?.filter { visible.contains($0.key) }
-            let zoneOwners = Dictionary(groups.map { ($0.id, $0.zoneOwner) }, uniquingKeysWith: { first, _ in first })
-            snapshot.groupRosters = snapshot.groupRosters?.filter { zoneOwners[$0.key] == $0.value.zoneOwner }
+            snapshot.groupDetails = snapshot.groupDetails?.filter { sameScope.contains($0.key) }
+            snapshot.groupRosters = snapshot.groupRosters?.filter { sameScope.contains($0.key) }
             rosterRequests = rosterRequests.filter { sameScope.contains($0.key) }
             rosterWrites = rosterWrites.filter { sameScope.contains($0.key) }
             for url in snapshot.pendingLinks {
@@ -176,10 +245,14 @@ final class GroupsModel {
                     invitationStates[key] = .joined
                 }
             }
-            isStale = false
-            saveCache()
-            diagnostic?.recordOnlineBaseline(account: verified)
+            isStale = result.incomplete
+            if result.incomplete { refreshIssue = "Some groups couldn’t be verified. Showing saved groups where available." }
+            let persisted = saveCache()
+            trace?.identifyTarget(account: verified, groups: groups)
+            trace?.record("Discovery applied · memory \(GroupAccountLaunchDiagnostic.groupSummary(groups)) · disk cache \(persisted ? "saved" : "save failed or unavailable")")
+            if !result.incomplete { diagnostic?.recordOnlineBaseline(account: verified) }
         } catch {
+            trace?.record("\(stage) failed · \(GroupAccountLaunchDiagnostic.errorCode(error)) · this refresh did not apply a discovery result")
             guard generation == started else { return }
             if resolvingAccount { scoringAccount = nil }
             if Self.isAccountLoss(error) {
@@ -189,7 +262,10 @@ final class GroupsModel {
             }
             refreshIssue = Self.message(for: error)
         }
-        if generation == started { isRefreshing = false }
+    }
+
+    private func discoveryPathIsCurrent(_ generation: UUID) -> Bool {
+        discoveryPathAvailable == true && discoveryPathGeneration == generation
     }
 
     func create(_ name: String, displayName: String, id: UUID) async -> Bool {
@@ -221,12 +297,16 @@ final class GroupsModel {
     ) async throws -> GroupDetails {
         guard let account else { throw GroupRepositoryError.unavailable }
         let started = generation
+        let path = discoveryPathGeneration
+        var checkingDetails = false
         do {
             try await verifyAccount(account)
+            checkingDetails = true
             let details = try await fetch(account)
+            checkingDetails = false
             try await verifyAccount(account)
             guard generation == started else { throw GroupRepositoryError.accountChanged }
-            guard groups.contains(where: { $0.id == group.id }) else { throw GroupRepositoryError.invalidGroup }
+            guard containsGroup(group) else { throw GroupRepositoryError.groupScopeUnavailable }
             var saved = snapshot.groupDetails ?? [:]
             let previous = saved[group.id]
             let refreshed = details.cachedDetails
@@ -245,15 +325,18 @@ final class GroupsModel {
             guard generation == started else { throw GroupRepositoryError.accountChanged }
             if Self.isAccountLoss(error) {
                 invalidateAccount()
-            } else if Self.isAccessLoss(error) {
-                removeCachedGroup(group.id)
+            } else if checkingDetails, GroupRepository.isConfirmedGroupAbsence(error), discoveryPathIsCurrent(path) {
+                try await verifyAccount(account)
+                if generation == started, discoveryPathIsCurrent(path), containsGroup(group) {
+                    removeCachedGroup(group.id, reason: "Group details error \(GroupAccountLaunchDiagnostic.errorCode(error))")
+                }
             }
             throw error
         }
     }
 
     func cachedDetails(for group: GroupSummary) -> CachedGroupDetails? {
-        guard account != nil, groups.contains(where: { $0.id == group.id }) else { return nil }
+        guard account != nil, containsGroup(group) else { return nil }
         return snapshot.groupDetails?[group.id]
     }
 
@@ -341,11 +424,15 @@ final class GroupsModel {
     ) async throws -> Result {
         guard let account else { throw GroupRepositoryError.unavailable }
         let started = generation
+        let path = discoveryPathGeneration
         do {
             let result = try await operation(account)
             guard generation == started else { throw GroupRepositoryError.accountChanged }
             guard isCurrent() else { throw CancellationError() }
-            guard containsGroup(group) else { throw GroupRosterError.accessLost }
+            guard containsGroup(group) else {
+                GroupAccountLaunchDiagnostic.activeTrace?.record("Shared group session ended · group scope missing from memory")
+                throw GroupRepositoryError.groupScopeUnavailable
+            }
             try apply(result)
             return result
         } catch {
@@ -354,15 +441,16 @@ final class GroupsModel {
             guard isCurrent() else { throw CancellationError() }
             if Self.isAccountLoss(error) {
                 invalidateAccount()
-            } else if (error as? GroupRosterError) == .accessLost, containsGroup(group) {
-                removeCachedGroup(group.id)
+            } else if (error as? GroupRosterError) == .accessLost {
+                guard discoveryPathIsCurrent(path) else { throw GroupRepositoryError.groupScopeUnavailable }
+                if containsGroup(group) { removeCachedGroup(group.id, reason: "Shared group session reported access lost") }
             }
             throw error
         }
     }
 
     func containsGroup(_ group: GroupSummary) -> Bool {
-        groups.contains { $0.id == group.id && $0.zoneOwner == group.zoneOwner && $0.isOwner == group.isOwner }
+        groups.contains { $0.scope == group.scope }
     }
 
     func gameJournal(for route: GroupGameRoute, account expectedAccount: String?) throws -> GroupGameJournal.Game {
@@ -374,21 +462,66 @@ final class GroupsModel {
     }
 
     func resumableGames() throws -> [GroupGameJournal.ResumeItem] {
-        guard let scoringAccount else { return [] }
-        let entries = try openScoringJournal().entries(in: journalNamespace(scoringAccount))
-        return entries.filter(\.canResume).sorted {
+        let trace = GroupAccountLaunchDiagnostic.activeTrace
+        guard let scoringAccount else {
+            trace?.record("Resume journal scan skipped · scoring identity unresolved")
+            return []
+        }
+        let entries: [GroupGameJournal.Entry]
+        do {
+            entries = try openScoringJournal().entries(in: journalNamespace(scoringAccount))
+        } catch {
+            trace?.record("Resume journal scan failed · local store open, fetch, or decode error")
+            throw error
+        }
+        if let trace {
+            let matching = entries.filter { trace.isTarget($0.scope.groupID) }.count
+            let targetRows = trace.knowsTarget ? "\(matching) for the test group" : "test group not identified yet"
+            trace.record("Resume journal scan · \(entries.count) row(s) for verified account · \(targetRows) · memory \(GroupAccountLaunchDiagnostic.groupSummary(groups))")
+        }
+        return entries.filter { entry in
+            if !entry.canResume {
+                trace?.recordJournal(entry, outcome: entry.isEligible ? "excluded · confirmed game is not in progress and queue is empty" : "excluded · saved eligibility is false")
+            }
+            return entry.canResume
+        }.sorted {
             ($0.operations.last?.createdAt ?? $0.confirmed.header.updatedAt ?? .distantPast) >
                 ($1.operations.last?.createdAt ?? $1.confirmed.header.updatedAt ?? .distantPast)
         }.compactMap { entry in
-            guard let group = groups.first(where: entry.scope.matches), let game = try? entry.scorecard() else { return nil }
+            guard let group = groups.first(where: entry.scope.matches) else {
+                if let trace {
+                    let sameGroup = groups.filter { $0.id == entry.scope.groupID }
+                    let reason = if sameGroup.isEmpty {
+                        "group absent from memory"
+                    } else if !sameGroup.contains(where: { $0.zoneOwner == entry.scope.zoneOwner }) {
+                        "cached zone owner differs"
+                    } else {
+                        "cached owner/member role differs"
+                    }
+                    trace.recordJournal(entry, outcome: "excluded · \(reason)")
+                }
+                return nil
+            }
+            guard let game = try? entry.scorecard() else {
+                trace?.recordJournal(entry, outcome: "excluded · local scorecard projection failed")
+                return nil
+            }
+            trace?.recordJournal(entry, outcome: "included in resume results")
             return GroupGameJournal.ResumeItem(route: GroupGameRoute(group: group, gameID: entry.scope.gameID),
                                                header: game.header, syncStatus: entry.syncStatus)
         }
     }
 
+    func diagnosticDiskCacheSummary() -> String {
+        guard let scoringAccount else { return "Scoring identity unresolved" }
+        guard let cache else { return "Cache unavailable" }
+        guard let persisted = try? cache.load(account: scoringAccount) else { return "Cache read failed" }
+        return GroupAccountLaunchDiagnostic.groupSummary(persisted.groups)
+    }
+
     private func openScoringJournal() throws -> GroupGameJournal {
         if let scoringJournal { return scoringJournal }
-        let opened = try GroupGameJournal()
+        let opened = try GroupGameJournal(url: journalURL)
         scoringJournal = opened
         return opened
     }
@@ -404,12 +537,19 @@ final class GroupsModel {
     ) async throws -> Result {
         if let session, session != generation { throw GroupRepositoryError.accountChanged }
         try Task.checkCancellation()
-        guard containsGroup(group) else { throw GroupRosterError.accessLost }
+        guard containsGroup(group) else {
+            GroupAccountLaunchDiagnostic.activeTrace?.record("Shared group session rejected · group scope missing from memory")
+            throw GroupRepositoryError.groupScopeUnavailable
+        }
+        let path = discoveryPathGeneration
         return try await withRosterSession(for: group, operation: { account in
             do {
                 let result = try await operation(self.repository, account)
                 try await self.repository.verifyAccount(account)
                 return result
+            } catch GroupGameError.gameNotFound where !self.discoveryPathIsCurrent(path) {
+                // An interrupted lookup cannot make the local scorecard ineligible.
+                throw GroupRepositoryError.groupScopeUnavailable
             } catch where Self.isAccessLoss(error) {
                 // A missing game or child record alone does not establish loss of membership.
                 _ = try await self.repository.roster(for: group, account: account).authorize()
@@ -469,7 +609,7 @@ final class GroupsModel {
                 try await self.repository.leave(group, account: account)
             }
             return {
-                self.removeCachedGroup(group.id)
+                self.removeCachedGroup(group.id, reason: "Explicit leave or delete succeeded")
             }
         }
         if success { await refresh() }
@@ -611,7 +751,7 @@ final class GroupsModel {
         defer {
             if generation == started {
                 isWorking = false
-                if nativeRefreshQueued { Task { await refresh() } }
+                if nativeRefreshQueued || discoveryRefreshQueued { Task { await refresh() } }
             }
         }
         do {
@@ -632,6 +772,7 @@ final class GroupsModel {
     }
 
     private func upsert(_ group: GroupSummary) {
+        groupCacheGeneration = UUID()
         snapshot.groups.removeAll { $0.id == group.id }
         snapshot.groups.append(group)
         snapshot.groups.sort {
@@ -641,16 +782,23 @@ final class GroupsModel {
         saveCache()
     }
 
-    private func removeCachedGroup(_ id: UUID) {
+    private func removeCachedGroup(_ id: UUID, reason: String) {
+        groupCacheGeneration = UUID()
+        let trace = GroupAccountLaunchDiagnostic.activeTrace
+        trace?.record("Group cache removal started · \(reason) · memory \(GroupAccountLaunchDiagnostic.groupSummary(groups))")
         snapshot.groups.removeAll { $0.id == id }
         snapshot.groupDetails?.removeValue(forKey: id)
         snapshot.groupRosters?.removeValue(forKey: id)
         rosterRequests[id] = nil
         rosterWrites[id] = nil
-        saveCache()
+        let persisted = saveCache()
+        trace?.record("Group cache removal ended · memory \(GroupAccountLaunchDiagnostic.groupSummary(groups)) · disk cache \(persisted ? "replaced" : "save failed or unavailable")")
     }
 
     func invalidateAccount() {
+        let trace = GroupAccountLaunchDiagnostic.activeTrace
+        trace?.record("Account invalidated · memory cleared from \(GroupAccountLaunchDiagnostic.groupSummary(groups)) to 0 groups · this action did not write the disk cache")
+        trace?.forgetTargetContext()
         generation = UUID()
         account = nil
         scoringAccount = nil
